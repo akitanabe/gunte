@@ -1,0 +1,153 @@
+# Finalized Doc-Rev 10 input for the fixture and the Issue #1-adopted SPEC revision.
+# The dotted frontmatter lookups, plain_token type, projected YAML frontmatter,
+# and recursive source-backed json-v1 rules below are adopted final vocabulary.
+spec_version = 1
+
+[project]
+id = "tugite"
+version = "4.5.0"
+
+[sources]
+files = [
+  "shared/agents/implementer.md",
+  "shared/agents/senior-implementer.md",
+  "shared/agents/expert-implementer.md",
+  "shared/agents/expert-selection-reviewer.md",
+  "shared/agents/responsibility-boundary-reviewer.md",
+  "shared/agents/test-quality-reviewer.md",
+  "shared/agents/writing-principles-reviewer.md",
+  "shared/agents/over-engineering-reviewer.md",
+  "shared/agents/plan-adversarial-reviewer.md",
+  "shared/agents/security-side-effect-reviewer.md",
+  "shared/agents/review-patch-refactorer.md",
+  "shared/skill/impl-lead/SKILL.md",
+  "shared/skill/impl-lead/references/implementation-branches.md",
+  "shared/skill/impl-lead/references/expert-selection.md",
+  "shared/skill/impl-lead/references/qa-and-integration.md",
+  "shared/skill/impl-lead/references/reviewer-dispatch.md",
+  "shared/skill/impl-lead/references/branch-review.md",
+  "shared/skill/impl-lead/references/finding-routing.md",
+  "shared/skill/impl-lead/references/run-closeout.md",
+  "shared/skill/impl-lead/references/qa-report.md",
+  "shared/skill/impl-lead/references/branch-plan-intake.md",
+  "shared/skill/impl-lead/references/reviewer-findings.md",
+  "shared/skill/branch-design/SKILL.md",
+  "shared/skill/branch-design/references/branch-plan-schema.md",
+  "shared/skill/branch-design/references/branch-splitting.md",
+  "shared/skill/branch-design/references/plan-review.md",
+  "shared/skill/test-audit/SKILL.md",
+  "shared/skill/test-audit/references/test-inventory-schema.md",
+  "shared/skill/test-audit/references/gap-catalog.md",
+  "shared/skill/test-audit/references/suite-scan.md",
+  "shared/skill/test-audit/references/inventory-report.md",
+  "shared/skill/plan-craft/SKILL.md",
+  "shared/skill/plan-craft/references/plan-artifacts.md",
+  "shared/skill/plan-craft/references/plan-drafting.md",
+  "shared/skill/plan-craft/references/adversarial-review.md",
+  "shared/skill/plan-craft/references/overengineering-plan-review.md",
+  "shared/skill/feature-lead/SKILL.md",
+  "declarations/claude/plugin.json",
+  "declarations/codex/plugin.json",
+  "shared/VERSION",
+]
+
+[terms.parent_agent]
+claude = "親エージェント"
+codex = "親 Codex エージェント"
+
+[terms.reviewer_invocation]
+claude = "新規 Agent"
+codex = "新しい reviewer worker"
+
+[terms.new_worker_invocation]
+claude = "新規の `Agent` 呼び出し"
+codex = "新しい worker の起動"
+
+[terms.new_worker]
+claude = "新規 `Agent`"
+codex = "新しい worker"
+
+[terms.continuation_mechanism]
+claude = "`SendMessage`"
+codex = "`followup_task`"
+
+[targets.claude]
+output_root = "plugins/claude"
+
+[[targets.claude.rules]]
+match = "shared/agents/*.md"
+path = "agents/{1}.md"
+profile = "markdown+yaml-frontmatter-v1"
+header = "<!-- Generated from shared/. Do not edit directly. -->"
+metadata = [
+  { field = "name", from = "core:name", type = "string" },
+  { field = "description", from = "frontmatter:claude.description", type = "string" },
+  { field = "model", from = "frontmatter:claude.model", type = "plain_token" },
+  { field = "effort", from = "frontmatter:claude.effort", type = "plain_token" },
+  { field = "tools", from = "frontmatter:claude.tools", type = "comma_list", required = false },
+  { field = "disallowedTools", from = "frontmatter:claude.disallowed_tools", type = "comma_list", required = false },
+]
+
+[[targets.claude.rules]]
+match = "shared/skill/*/SKILL.md"
+path = "skills/{1}/SKILL.md"
+profile = "markdown+yaml-frontmatter-v1"
+header = "<!-- Generated from shared/. Do not edit directly. -->"
+
+[[targets.claude.rules]]
+match = "shared/skill/*/references/*.md"
+path = "skills/{1}/references/{2}.md"
+profile = "markdown-v1"
+header = "<!-- Generated from shared/. Do not edit directly. -->"
+
+[[targets.claude.rules]]
+match = "declarations/claude/plugin.json"
+path = ".claude-plugin/plugin.json"
+profile = "json-v1"
+metadata = [
+  { field = "version", from = "project:version", type = "string" },
+]
+
+[targets.codex]
+output_root = "plugins/codex"
+
+[[targets.codex.rules]]
+match = "shared/agents/*.md"
+path = "install/agents/{1}.toml"
+profile = "toml-v1"
+header = "Generated from shared/. Do not edit directly."
+body_field = "developer_instructions"
+metadata = [
+  { field = "name", from = "core:name", type = "string" },
+  { field = "description", from = "frontmatter:codex.description", type = "string" },
+  { field = "model", from = "frontmatter:codex.model", type = "string" },
+  { field = "model_reasoning_effort", from = "frontmatter:codex.model_reasoning_effort", type = "string" },
+  { field = "sandbox_mode", from = "frontmatter:codex.sandbox_mode", type = "string", required = false },
+  { field = "nickname_candidates", from = "frontmatter:codex.nickname_candidates", type = "string_list" },
+]
+
+[[targets.codex.rules]]
+match = "shared/skill/*/SKILL.md"
+path = "skills/{1}/SKILL.md"
+profile = "markdown+yaml-frontmatter-v1"
+header = "<!-- Generated from shared/. Do not edit directly. -->"
+
+[[targets.codex.rules]]
+match = "shared/skill/*/references/*.md"
+path = "skills/{1}/references/{2}.md"
+profile = "markdown-v1"
+header = "<!-- Generated from shared/. Do not edit directly. -->"
+
+[[targets.codex.rules]]
+match = "declarations/codex/plugin.json"
+path = ".codex-plugin/plugin.json"
+profile = "json-v1"
+metadata = [
+  { field = "version", from = "project:version", type = "string" },
+]
+
+[[targets.codex.rules]]
+match = "shared/VERSION"
+path = "install/VERSION"
+profile = "plain-text-v1"
+value_from = "project:version"

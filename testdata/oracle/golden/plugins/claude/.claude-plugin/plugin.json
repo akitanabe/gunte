@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "tugite",
+  "displayName": "Tugite",
+  "description": "実装作業をサブエージェントへ委譲しつつ、親エージェントがマネージャー兼 QA として品質責任を持つためのプラグイン。",
+  "version": "4.5.0",
+  "author": {
+    "name": "akitanabe"
+  },
+  "license": "MIT",
+  "keywords": [
+    "agentic-workflow",
+    "qa",
+    "subagent",
+    "delegation",
+    "tdd"
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "tugite",
+  "version": "4.5.0",
+  "description": "Install the bundled custom agents and delegate implementation while the parent Codex agent keeps responsibility for planning, QA, review, and final verification.",
+  "author": {
+    "name": "akitanabe"
+  },
+  "repository": "https://github.com/akitanabe/tugite",
+  "license": "MIT",
+  "keywords": [
+    "agentic-workflow",
+    "qa",
+    "delegation",
+    "tdd",
+    "worktree"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Tugite",
+    "shortDescription": "Install agents and delegate with parent QA.",
+    "longDescription": "Codex skills for safely installing or updating bundled custom agents and for splitting implementation work into serial implementation branches, each in its own worktree, delegating focused slices, reviewing returned diffs and tests, and keeping final quality responsibility with the parent agent.",
+    "developerName": "akitanabe",
+    "category": "Productivity",
+    "capabilities": [
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $plan-craft to draft and adversarially review an implementation plan without starting branch planning.",
+      "Use $branch-design to normalize a plan into a delegatable Branch Plan without starting delegation.",
+      "Use $impl-lead to delegate this implementation with parent QA.",
+      "Use $install-custom-agents to check, install, or update the bundled custom agents."
+    ]
+  }
+}

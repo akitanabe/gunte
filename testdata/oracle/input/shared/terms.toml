@@ -1,0 +1,19 @@
+[terms.parent_agent]
+claude = "親エージェント"
+codex = "親 Codex エージェント"
+
+[terms.reviewer_invocation]
+claude = "新規 Agent"
+codex = "新しい reviewer worker"
+
+[terms.new_worker_invocation]
+claude = "新規の `Agent` 呼び出し"
+codex = "新しい worker の起動"
+
+[terms.new_worker]
+claude = "新規 `Agent`"
+codex = "新しい worker"
+
+[terms.continuation_mechanism]
+claude = "`SendMessage`"
+codex = "`followup_task`"

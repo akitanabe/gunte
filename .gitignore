@@ -1,4 +1,4 @@
-docs/
+/.local/
 
 # Go build and test artifacts
 /bin/

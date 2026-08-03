@@ -1,0 +1,6 @@
+# 正本（SPEC / 設計判断）は issue で管理し、リポジトリには commit しない
+# （正本: https://github.com/akitanabe/gunte/issues/1）
+SPEC*.md
+design-decisions*.md
+docs/history/
+__pycache__/

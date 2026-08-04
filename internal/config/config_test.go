@@ -818,6 +818,23 @@ applies_to = ["one"]
 	}
 }
 
+func TestParseContractsPreservesPredicateTablePosition(t *testing.T) {
+	input := []byte("# header\n\n[contracts.first]\nkind = \"forbids\"\npattern = \"x\"\napplies_to = [\"one\"]\n\n   [contracts.'second'] # trailing comment\nkind = \"forbids\"\npattern = \"y\"\napplies_to = [\"one\"]\n")
+	registry, diagnostics := ParseContracts("contracts.toml", input, []string{"one"})
+	if len(diagnostics) != 0 {
+		t.Fatalf("unexpected diagnostics: %v", diagnostics)
+	}
+	if len(registry.Contracts) != 2 {
+		t.Fatalf("contracts = %#v", registry.Contracts)
+	}
+	want := []ContractPosition{{Path: "contracts.toml", Line: 3, Column: 1}, {Path: "contracts.toml", Line: 8, Column: 4}}
+	for index, contract := range registry.Contracts {
+		if contract.Position != want[index] {
+			t.Errorf("contract %d position = %#v, want %#v", index, contract.Position, want[index])
+		}
+	}
+}
+
 func TestSyntaxErrorIsLocated(t *testing.T) {
 	_, diagnostics := ParseProject("syntax.toml", []byte("spec_version = [\n"))
 	if len(diagnostics) != 1 || diagnostics[0].Path != "syntax.toml" || diagnostics[0].Line != 1 || diagnostics[0].Column < 1 {

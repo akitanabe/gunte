@@ -107,4 +107,13 @@ type Contract struct {
 	Before    string
 	After     string
 	AppliesTo []string
+	Position  ContractPosition
+}
+
+// ContractPosition identifies the predicate table header in its source file.
+// Line and Column are one-origin and Column counts bytes from the line start.
+type ContractPosition struct {
+	Path   string
+	Line   int
+	Column int
 }

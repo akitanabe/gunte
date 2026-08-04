@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -35,7 +36,12 @@ func (v *validator) contracts(root map[string]any, order []toml.Key, knownTarget
 			continue
 		}
 		v.unknownKeys(prefix, values, "kind", "slice", "pattern", "before", "after", "applies_to")
-		contract := Contract{ID: id, Kind: PredicateKind(requiredString(v, values, prefix+".kind", "kind"))}
+		line, column := locateContractTable(v.input, id)
+		contract := Contract{
+			ID:       id,
+			Kind:     PredicateKind(requiredString(v, values, prefix+".kind", "kind")),
+			Position: ContractPosition{Path: v.path, Line: line, Column: column},
+		}
 		contract.Slice = optionalString(v, values, prefix, "slice")
 		contract.Pattern = optionalString(v, values, prefix, "pattern")
 		contract.Before = optionalString(v, values, prefix, "before")
@@ -45,6 +51,40 @@ func (v *validator) contracts(root map[string]any, order []toml.Key, knownTarget
 		registry.Contracts = append(registry.Contracts, contract)
 	}
 	return registry
+}
+
+func locateContractTable(input []byte, id string) (int, int) {
+	for lineNumber, line := range strings.Split(string(input), "\n") {
+		trimmed := strings.TrimSpace(line)
+		const prefix = "[contracts."
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		closeBracket := strings.IndexByte(trimmed[len(prefix):], ']')
+		if closeBracket < 0 {
+			continue
+		}
+		closeBracket += len(prefix)
+		remainder := strings.TrimSpace(trimmed[closeBracket+1:])
+		if remainder != "" && !strings.HasPrefix(remainder, "#") {
+			continue
+		}
+		candidate := trimmed[len(prefix):closeBracket]
+		if unquoted, err := strconv.Unquote(candidate); err == nil {
+			candidate = unquoted
+		} else if len(candidate) >= 2 && candidate[0] == '\'' && candidate[len(candidate)-1] == '\'' {
+			candidate = candidate[1 : len(candidate)-1]
+		}
+		if candidate != id {
+			continue
+		}
+		column := strings.Index(line, "[")
+		if column < 0 {
+			column = 0
+		}
+		return lineNumber + 1, column + 1
+	}
+	return 1, 1
 }
 
 func optionalString(v *validator, values map[string]any, prefix, key string) string {

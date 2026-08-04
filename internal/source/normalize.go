@@ -45,11 +45,13 @@ func diagnosticAt(buffer []byte, offset int, message string) Diagnostic {
 	if offset > len(buffer) {
 		offset = len(buffer)
 	}
-	line, column := lineColumn(buffer, offset)
+	line, column := LineColumn(buffer, offset)
 	return Diagnostic{Offset: offset, Line: line, Column: column, Message: message}
 }
 
-func lineColumn(buffer []byte, offset int) (int, int) {
+// LineColumn returns the one-origin line and byte-based column for offset in a
+// normalized buffer. Offset must be within [0, len(buffer)].
+func LineColumn(buffer []byte, offset int) (int, int) {
 	line := 1
 	lineStart := 0
 	for index := 0; index < offset; index++ {

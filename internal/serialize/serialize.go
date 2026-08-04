@@ -70,16 +70,29 @@ func Serialize(input adapter.Artifact) (Artifact, []Diagnostic) {
 			if input.Header != "" {
 				prefix = len(input.Header) + 2
 			}
+			suffix := body[frontEnd:]
+			trimmed := 0
+			// Only the canonical separator may be collapsed; further blank lines are
+			// source content and stripping them would change preserved projection bytes.
+			if input.Header != "" && len(suffix) > 0 && suffix[0] == '\n' {
+				trimmed = 1
+				suffix = suffix[trimmed:]
+			}
 			result.Bytes = make([]byte, 0, len(body)+prefix)
 			result.Bytes = append(result.Bytes, body[:frontEnd]...)
 			if input.Header != "" {
 				result.Bytes = append(result.Bytes, []byte(input.Header+"\n\n")...)
 			}
-			result.Bytes = append(result.Bytes, body[frontEnd:]...)
+			result.Bytes = append(result.Bytes, suffix...)
 			mapDeclarations(&result, input, func(offset int) int {
 				mapped := mapping.at(offset)
 				if mapped >= frontEnd {
-					return mapped + prefix
+					if trimmed != 0 && mapped == frontEnd {
+						// This removed separator boundary belongs after the inserted
+						// header; ordinary trimming would point back into its last byte.
+						return mapped + prefix
+					}
+					return mapped + prefix - trimmed
 				}
 				return mapped
 			})

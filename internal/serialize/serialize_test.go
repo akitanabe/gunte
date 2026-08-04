@@ -115,6 +115,138 @@ func TestSerializeYAMLPreserveKeepsFrontmatterBytesAndMapsBody(t *testing.T) {
 	}
 }
 
+func TestSerializeYAMLPreserveRemovesProjectionBlankLineBeforeHeader(t *testing.T) {
+	body := []byte("---\nname: source\n---\n\nbody\n")
+	bodyStart := bytes.Index(body, []byte("body"))
+	if bodyStart < 0 {
+		t.Fatal("body fixture is missing its declaration text")
+	}
+	input := adapter.Artifact{
+		Profile: config.ProfileYAML, Header: "Generated", Body: body,
+		Contracts: []compile.ProjectedDeclaration{{ID: "body", Emitted: true, ProjectedRange: source.Range{Start: bodyStart, End: bodyStart + len("body")}}},
+	}
+	got, diagnostics := Serialize(input)
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	want := "---\nname: source\n---\nGenerated\n\nbody\n"
+	if string(got.Bytes) != want {
+		t.Fatalf("bytes = %q, want %q", got.Bytes, want)
+	}
+	wantStart := strings.Index(want, "body")
+	if got.Contracts[0].ArtifactRange != (source.Range{Start: wantStart, End: wantStart + len("body")}) {
+		t.Fatalf("mapped range = %#v, want [%d,%d)", got.Contracts[0].ArtifactRange, wantStart, wantStart+len("body"))
+	}
+}
+
+func TestSerializeYAMLPreserveSeparatorDeletionMapsToInsertionBoundary(t *testing.T) {
+	body := []byte("---\nname: source\n---\n\nbody\n")
+	frontEnd, ok := yamlFrontmatterEnd(body)
+	if !ok {
+		t.Fatal("frontmatter fixture is invalid")
+	}
+	input := adapter.Artifact{
+		Profile: config.ProfileYAML, Header: "Generated", Body: body,
+		Contracts: []compile.ProjectedDeclaration{
+			{ID: "anchor", Emitted: true, ProjectedRange: source.Range{Start: frontEnd, End: frontEnd}},
+			{ID: "separator", Emitted: true, ProjectedRange: source.Range{Start: frontEnd, End: frontEnd + 1}},
+		},
+	}
+	got, diagnostics := Serialize(input)
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	want := "---\nname: source\n---\nGenerated\n\nbody\n"
+	wantBoundary := strings.Index(want, "Generated") + len("Generated\n\n")
+	wantRange := source.Range{Start: wantBoundary, End: wantBoundary}
+	if got.Contracts[0].ArtifactRange != wantRange || got.Contracts[1].ArtifactRange != wantRange {
+		t.Fatalf("separator mappings = %#v, want both %#v", got.Contracts, wantRange)
+	}
+}
+
+func TestSerializeYAMLPreserveCanonicalSeparatorsAndMappings(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          []byte
+		header        string
+		want          string
+		bodyStartFrom string
+	}{
+		{
+			name:   "header with empty suffix",
+			body:   []byte("---\nname: source\n---\n"),
+			header: "Generated",
+			want:   "---\nname: source\n---\nGenerated\n\n",
+		},
+		{
+			name:          "header with multiple blank lines",
+			body:          []byte("---\nname: source\n---\n\n\nbody\n"),
+			header:        "Generated",
+			want:          "---\nname: source\n---\nGenerated\n\n\nbody\n",
+			bodyStartFrom: "body",
+		},
+		{
+			name:          "header absent preserves blank lines",
+			body:          []byte("---\nname: source\n---\n\n\nbody\n"),
+			want:          "---\nname: source\n---\n\n\nbody\n",
+			bodyStartFrom: "body",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			frontEnd, ok := yamlFrontmatterEnd(test.body)
+			if !ok {
+				t.Fatal("frontmatter fixture is invalid")
+			}
+			anchor := compile.ProjectedDeclaration{ID: "anchor", Emitted: true, ProjectedRange: source.Range{Start: frontEnd, End: frontEnd}}
+			declarations := []compile.ProjectedDeclaration{anchor}
+			if test.bodyStartFrom != "" {
+				bodyStart := bytes.Index(test.body, []byte(test.bodyStartFrom))
+				if bodyStart < 0 {
+					t.Fatalf("body fixture is missing %q", test.bodyStartFrom)
+				}
+				declarations = append(declarations,
+					compile.ProjectedDeclaration{ID: "body", Emitted: true, ProjectedRange: source.Range{Start: bodyStart, End: bodyStart + len(test.bodyStartFrom)}},
+				)
+			}
+			declarations = append(declarations,
+				compile.ProjectedDeclaration{ID: "eof", Emitted: true, ProjectedRange: source.Range{Start: len(test.body), End: len(test.body)}},
+			)
+			got, diagnostics := Serialize(adapter.Artifact{
+				Profile: config.ProfileYAML, Header: test.header, Body: test.body, Contracts: declarations,
+			})
+			if len(diagnostics) != 0 {
+				t.Fatalf("diagnostics = %#v", diagnostics)
+			}
+			if string(got.Bytes) != test.want {
+				t.Fatalf("bytes = %q, want %q", got.Bytes, test.want)
+			}
+			if got.Contracts[len(got.Contracts)-1].ArtifactRange != (source.Range{Start: len(test.want), End: len(test.want)}) {
+				t.Fatalf("EOF mapping = %#v, want %d", got.Contracts[len(got.Contracts)-1], len(test.want))
+			}
+			if test.header == "" {
+				if got.Contracts[0].ArtifactRange != (source.Range{Start: frontEnd, End: frontEnd}) {
+					t.Fatalf("headerless anchor mapping = %#v, want %d", got.Contracts[0], frontEnd)
+				}
+				return
+			}
+			headerEnd := frontEnd + len(test.header+"\n\n")
+			if got.Contracts[0].ArtifactRange != (source.Range{Start: headerEnd, End: headerEnd}) {
+				t.Fatalf("header anchor mapping = %#v, want %d", got.Contracts[0], headerEnd)
+			}
+			if len(got.Contracts) > 2 {
+				bodyStart := bytes.Index(test.body, []byte(test.bodyStartFrom))
+				trimmed := 1
+				wantBodyStart := frontEnd + len(test.header+"\n\n") + (bodyStart - frontEnd - trimmed)
+				wantBodyEnd := wantBodyStart + len(test.bodyStartFrom)
+				if got.Contracts[1].ArtifactRange != (source.Range{Start: wantBodyStart, End: wantBodyEnd}) {
+					t.Fatalf("body mapping = %#v, want [%d,%d)", got.Contracts[1], wantBodyStart, wantBodyEnd)
+				}
+			}
+		})
+	}
+}
+
 func TestSerializeTOMLHeaderMetadataAndEscapedBodyMapPositions(t *testing.T) {
 	body := []byte("a\\\"\nβ\n")
 	input := adapter.Artifact{

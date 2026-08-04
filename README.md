@@ -6,6 +6,8 @@ Gunteは、単一の正本集合からClaude Code、Codexなどのtarget向け�
 
 v1の保証範囲は、決定論的な生成と、生成時の`requires` / `forbids` / `order`契約検査です。正本仕様は[Issue #1: Gunte v1 正本SPEC](https://github.com/akitanabe/gunte/issues/1)（Spec-Version 1 / Doc-Rev 10）で管理しています。
 
+Gunteが解決する問題と、避けるべき設計については[アンチパターン集](docs/gunte-antipatterns.md)を参照してください。
+
 ## 主な機能
 
 - targetごとの本文投影: `@only`でClaude Code用、Codex用などの記述を1つの正本内に共存させる

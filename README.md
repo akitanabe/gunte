@@ -312,16 +312,11 @@ CIでは、正本または設定の変更後に生成物をcommitし、drift検�
 
 ## 開発
 
-Goのunit / integration / conformance testを実行します。
+Goのunit / integration / conformance testを実行します。oracle fixtureの来歴、path集合、
+digest、設定被覆も同じtest suiteで検証します。
 
 ```sh
 go test ./...
-```
-
-oracle fixtureの来歴、path集合、digest、設定被覆はPythonのtestでも検証できます。
-
-```sh
-python3 -B -m unittest discover -s tests
 ```
 
 `testdata/oracle/`には、Tugiteの固定commitを元にした入力と全77件のgolden artifactがあります。再生成手順とfixture固有の変換は[testdata/oracle/README.md](testdata/oracle/README.md)を参照してください。
@@ -330,6 +325,5 @@ python3 -B -m unittest discover -s tests
 
 ```sh
 go test ./...
-python3 -B -m unittest discover -s tests
 git diff --check
 ```

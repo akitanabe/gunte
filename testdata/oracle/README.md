@@ -164,8 +164,8 @@ byte一致可能である。placeholder は fixture 内で fence 内に存在せ
 ## 検証
 
 ```sh
-python3 -B -m unittest discover -s tests -p 'test_oracle_fixture.py'
-python3 -B -m unittest discover -s tests
+go test . -run Oracle
+go test ./...
 git diff --check
 ```
 

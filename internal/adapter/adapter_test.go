@@ -343,6 +343,16 @@ func TestAdaptDetectsSemanticInputCollision(t *testing.T) {
 	}
 }
 
+func TestAdaptDetectsEachSelectedContractFileCollision(t *testing.T) {
+	for _, contractPath := range []string{"rules/a.toml", "rules/b.toml"} {
+		project := config.ProjectConfig{ContractFiles: []string{"rules/a.toml", "rules/b.toml"}, Sources: config.Sources{Files: []string{"source.md"}}, Targets: []config.Target{{ID: "target", OutputRoot: "rules", Rules: []config.Rule{{Match: "source.md", Path: filepath.Base(contractPath), Profile: config.ProfileMarkdown}}}}}
+		_, diagnostics := Adapt(project, []Source{{Projection: compile.SourceProjection{Path: "source.md", Bytes: []byte("body")}}})
+		if !hasCode(diagnostics, "path_collision") {
+			t.Fatalf("%s diagnostics = %#v", contractPath, diagnostics)
+		}
+	}
+}
+
 func TestAdaptDoesNotMutateCompleteProjectOrSourceInput(t *testing.T) {
 	project := config.ProjectConfig{
 		SpecVersion: 1,

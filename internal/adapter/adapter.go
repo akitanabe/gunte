@@ -214,11 +214,8 @@ func validRelativePath(value string) bool {
 }
 
 func semanticInputPaths(project config.ProjectConfig) map[string]bool {
-	paths := map[string]bool{"gunte.toml": true, "contracts.toml": true}
-	if project.Project.VersionFrom != "" {
-		paths[project.Project.VersionFrom] = true
-	}
-	for _, file := range project.Sources.Files {
+	paths := map[string]bool{}
+	for _, file := range config.SemanticInputPaths(project) {
 		paths[file] = true
 	}
 	return paths

@@ -7,16 +7,47 @@ type Diagnostic struct {
 	Path    string
 	Line    int
 	Column  int
+	Related []ContractPosition
 	Message string
 }
 
 // ProjectConfig is the validated project configuration in declaration order.
 type ProjectConfig struct {
-	SpecVersion int
-	Project     Project
-	Sources     Sources
-	Terms       []Term
-	Targets     []Target
+	SpecVersion   int
+	Project       Project
+	ContractFiles []string
+	Sources       Sources
+	Terms         []Term
+	Targets       []Target
+}
+
+// ContractDocument is one selected registry input already read by the app boundary.
+type ContractDocument struct {
+	Path  string
+	Bytes []byte
+}
+
+// SemanticInputPaths returns the normative duplicate-free semantic input order.
+func SemanticInputPaths(project ProjectConfig) []string {
+	candidates := []string{"gunte.toml"}
+	if project.ContractFiles == nil {
+		candidates = append(candidates, "contracts.toml")
+	} else {
+		candidates = append(candidates, project.ContractFiles...)
+	}
+	if project.Project.VersionFrom != "" {
+		candidates = append(candidates, project.Project.VersionFrom)
+	}
+	candidates = append(candidates, project.Sources.Files...)
+	seen := map[string]bool{}
+	result := make([]string, 0, len(candidates))
+	for _, path := range candidates {
+		if !seen[path] {
+			seen[path] = true
+			result = append(result, path)
+		}
+	}
+	return result
 }
 
 // TargetIDs returns target IDs in declaration order.

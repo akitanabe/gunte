@@ -8,7 +8,11 @@ import (
 )
 
 func (v *validator) project(root map[string]any, order []toml.Key) ProjectConfig {
-	v.unknownKeys("", root, "spec_version", "project", "sources", "terms", "targets")
+	allowed := []string{"spec_version", "project", "sources", "terms", "targets"}
+	if version, ok := root["spec_version"].(int64); ok && version == 2 {
+		allowed = append(allowed, "contracts")
+	}
+	v.unknownKeys("", root, allowed...)
 	config := ProjectConfig{}
 	if raw, ok := root["spec_version"]; !ok {
 		v.add("spec_version", "spec_version is required")
@@ -21,6 +25,11 @@ func (v *validator) project(root map[string]any, order []toml.Key) ProjectConfig
 		}
 	}
 	config.Project = v.projectData(root["project"], config.SpecVersion)
+	if config.SpecVersion == 2 {
+		config.ContractFiles = v.contractFiles(root["contracts"])
+	} else {
+		config.ContractFiles = []string{"contracts.toml"}
+	}
 	config.Sources = v.sources(root["sources"], config.SpecVersion)
 	targets, targetSet := v.targets(root["targets"], order, config.SpecVersion)
 	config.Targets = targets
@@ -29,6 +38,47 @@ func (v *validator) project(root map[string]any, order []toml.Key) ProjectConfig
 		v.validateManagedScopes(config)
 	}
 	return config
+}
+
+func (v *validator) contractFiles(raw any) []string {
+	if raw == nil {
+		return []string{"contracts.toml"}
+	}
+	values, ok := table(raw)
+	if !ok {
+		v.add("contracts", "contracts must be a table")
+		return nil
+	}
+	v.unknownKeys("contracts", values, "files")
+	rawFiles, exists := values["files"]
+	if !exists {
+		return []string{"contracts.toml"}
+	}
+	items, ok := array(rawFiles)
+	if !ok {
+		v.add("contracts.files", "contracts.files must be an array of strings")
+		return nil
+	}
+	if len(items) == 0 {
+		v.add("contracts.files", "contracts.files must contain at least one path")
+	}
+	result := make([]string, 0, len(items))
+	seen := map[string]bool{}
+	for index, item := range items {
+		key := formatIndex("contracts.files", index)
+		path, ok := stringValue(item)
+		if !ok {
+			v.add(key, key+" must be a string")
+			continue
+		}
+		result = append(result, path)
+		validatePath(v, key, path)
+		if seen[path] {
+			v.add(key, "duplicate contract path "+path)
+		}
+		seen[path] = true
+	}
+	return result
 }
 
 func (v *validator) projectData(raw any, specVersion int) Project {

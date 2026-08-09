@@ -20,7 +20,7 @@ Gunteが解決する問題と、避けるべき設計については[アンチ�
 
 ## Spec-Version 2
 
-v2ではversion file、managed inventory、typed structural contract、registry integrity、lock、target scopeを扱えます。詳細な正本仕様は[docs/gunte-spec.md](docs/gunte-spec.md)で確認できます。追加設定を組み合わせた最小例は次のとおりです。
+v2では複数contract file、version file、managed inventory、typed structural contract、registry integrity、lock、target scopeを扱えます。`gunte.toml`の`[contracts].files`を省略すると`contracts.toml`だけを読みます。明示した場合はそのproject相対pathだけを宣言順に読み、`contracts.toml`を暗黙追加しません。各file内のpredicate宣言順と組み合わせた順序がregistry、診断、lockの規範順です。詳細な正本仕様は[docs/gunte-spec.md](docs/gunte-spec.md)で確認できます。追加設定を組み合わせた最小例は次のとおりです。
 
 ```toml
 spec_version = 2
@@ -28,6 +28,9 @@ spec_version = 2
 [project]
 id = "example"
 version_from = "VERSION"
+
+[contracts]
+files = ["contracts/base.toml", "contracts/structure.toml"]
 
 [sources]
 files = ["shared/guide.md"]
@@ -38,7 +41,11 @@ allow_dirs = ["shared/examples"]
 [targets.claude]
 output_root = "dist/claude"
 managed_roots = ["generated"]
+```
 
+`contracts/structure.toml`にはpredicateを宣言します。
+
+```toml
 [contracts.guide-frontmatter]
 kind = "structure"
 subject = "source_frontmatter"
@@ -154,7 +161,7 @@ directive行は生成物から除かれます。`@only claude`の内容は`claud
 
 ### 3. 契約を定義する
 
-`contracts.toml`に、生成後のartifactへ課す条件を宣言します。
+既定の`contracts.toml`、またはv2の`[contracts].files`で選んだ各fileに、生成後のartifactへ課す条件を宣言します。
 
 ```toml
 [contracts.has-completion-criteria]
@@ -175,7 +182,7 @@ after = "closing"
 applies_to = ["claude", "codex"]
 ```
 
-契約が不要でも`contracts.toml`は必要です。空のregistryは次のように書きます。
+契約が不要でも選択したcontract fileは必要です。既定の空registryは`contracts.toml`へ次のように書きます。
 
 ```toml
 [contracts]
@@ -221,6 +228,7 @@ pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`
 - `path`では、`match`内の各`*`を宣言順に`{1}`〜`{9}`で参照します。
 - 同じsourceが同一target内の複数ruleに一致するとエラーです。
 - `output_root + "/" + path`が別artifactまたはsemantic inputと一致するとエラーです。
+- v2のsemantic inputは`gunte.toml`、選択した全contract file、`version_from`、`sources.files`の順で最初の出現だけを採用します。選択したcontract fileはsource inventoryとartifact collisionにも同じ順序・集合で反映されます。
 
 ### 出力profile
 

@@ -70,25 +70,34 @@ type writer interface {
 	Write(path string, data []byte) error
 }
 
+type lockWriter interface {
+	Write(path string, data []byte) error
+}
+
 // Runner executes one emit or check command for a fixed project root.
 type Runner struct {
 	root   string
 	reader reader
 	dirs   directoryReader
 	writer writer
+	lock   lockWriter
 }
 
 // NewRunner creates a runner backed by the local filesystem.
 func NewRunner(root string) Runner {
-	return Runner{root: root, reader: localReader{}, dirs: localReader{}, writer: localWriter{root: root}}
+	return Runner{root: root, reader: localReader{}, dirs: localReader{}, writer: localWriter{root: root}, lock: atomicLockWriter{}}
 }
 
 func newRunnerWithWriter(root string, output writer) Runner {
-	return Runner{root: root, reader: localReader{}, dirs: localReader{}, writer: output}
+	return Runner{root: root, reader: localReader{}, dirs: localReader{}, writer: output, lock: atomicLockWriter{}}
 }
 
 func newRunnerWithReader(root string, input reader, output writer) Runner {
-	return Runner{root: root, reader: input, dirs: localReader{}, writer: output}
+	return Runner{root: root, reader: input, dirs: localReader{}, writer: output, lock: atomicLockWriter{}}
+}
+
+func newRunnerWithWriters(root string, output writer, lockOutput lockWriter) Runner {
+	return Runner{root: root, reader: localReader{}, dirs: localReader{}, writer: output, lock: lockOutput}
 }
 
 // Run parses the minimal CLI grammar and executes emit or check.
@@ -145,7 +154,7 @@ func (runner Runner) Run(args []string) Result {
 	}
 	lockBytes := calculateLock(project, registry, units)
 	if command == "lock" {
-		if err := lockfile.WriteAtomic(filepath.Join(runner.root, "gunte.lock.json"), lockBytes); err != nil {
+		if err := runner.lock.Write(filepath.Join(runner.root, "gunte.lock.json"), lockBytes); err != nil {
 			return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{{Kind: "write_error", Path: "gunte.lock.json", Message: err.Error()}}}
 		}
 		return Result{ExitCode: ExitSuccess}
@@ -228,11 +237,20 @@ func (runner Runner) loadProject() (config.ProjectConfig, []Diagnostic) {
 }
 
 func (runner Runner) loadRegistry(project config.ProjectConfig) (config.ContractRegistry, []Diagnostic) {
-	data, err := runner.read("contracts.toml")
-	if err != nil {
-		return config.ContractRegistry{}, []Diagnostic{{Kind: "load_error", Path: "contracts.toml", Message: err.Error()}}
+	documents := make([]config.ContractDocument, 0, len(project.ContractFiles))
+	var diagnostics []Diagnostic
+	for _, path := range project.ContractFiles {
+		data, err := runner.read(path)
+		if err != nil {
+			diagnostics = append(diagnostics, Diagnostic{Kind: "load_error", Path: path, Message: err.Error()})
+			continue
+		}
+		documents = append(documents, config.ContractDocument{Path: path, Bytes: data})
 	}
-	registry, configDiagnostics := config.ParseContractsForSpec("contracts.toml", data, project.TargetIDs(), project.SpecVersion)
+	if len(diagnostics) != 0 {
+		return config.ContractRegistry{}, diagnostics
+	}
+	registry, configDiagnostics := config.ParseContractDocuments(documents, project.TargetIDs(), project.SpecVersion)
 	return registry, configDiagnosticResults(configDiagnostics)
 }
 
@@ -315,10 +333,7 @@ func adapterSources(units []compile.SourceUnit) []adapter.Source {
 }
 
 func (runner Runner) checkInventory(project config.ProjectConfig, artifacts []serialize.Artifact, selected string) []Diagnostic {
-	expectedSource := append([]string(nil), project.Sources.Files...)
-	if project.Project.VersionFrom != "" {
-		expectedSource = append(expectedSource, project.Project.VersionFrom)
-	}
+	expectedSource := config.SemanticInputPaths(project)[1:]
 	result := make([]Diagnostic, 0)
 	for _, root := range project.Sources.ManagedRoots {
 		scope := inventory.Scope{Root: root, AllowFiles: project.Sources.AllowFiles, AllowDirs: project.Sources.AllowDirs}
@@ -466,7 +481,11 @@ func selectedIDs(selected string) []string {
 func configDiagnosticResults(diagnostics []config.Diagnostic) []Diagnostic {
 	result := make([]Diagnostic, len(diagnostics))
 	for index, diagnostic := range diagnostics {
-		result[index] = Diagnostic{Kind: "config_error", Path: diagnostic.Path, Line: diagnostic.Line, Column: diagnostic.Column, Message: diagnostic.Message}
+		related := make([]Location, len(diagnostic.Related))
+		for i, position := range diagnostic.Related {
+			related[i] = Location{Path: position.Path, Line: position.Line, Column: position.Column}
+		}
+		result[index] = Diagnostic{Kind: "config_error", Path: diagnostic.Path, Line: diagnostic.Line, Column: diagnostic.Column, Related: related, Message: diagnostic.Message}
 	}
 	return result
 }
@@ -509,6 +528,12 @@ func locations(positions []compile.SourcePosition) []Location {
 }
 
 type localReader struct{}
+
+type atomicLockWriter struct{}
+
+func (atomicLockWriter) Write(path string, data []byte) error {
+	return lockfile.WriteAtomic(path, data)
+}
 
 func (localReader) ReadFile(path string) ([]byte, error)       { return os.ReadFile(path) }
 func (localReader) ReadDir(path string) ([]os.DirEntry, error) { return os.ReadDir(path) }

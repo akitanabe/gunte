@@ -16,20 +16,7 @@ import (
 
 // SemanticInputPaths returns the normative, duplicate-free input order.
 func SemanticInputPaths(project config.ProjectConfig) []string {
-	candidates := []string{"gunte.toml", "contracts.toml"}
-	if project.Project.VersionFrom != "" {
-		candidates = append(candidates, project.Project.VersionFrom)
-	}
-	candidates = append(candidates, project.Sources.Files...)
-	seen := map[string]bool{}
-	result := make([]string, 0, len(candidates))
-	for _, path := range candidates {
-		if !seen[path] {
-			seen[path] = true
-			result = append(result, path)
-		}
-	}
-	return result
+	return config.SemanticInputPaths(project)
 }
 
 // CanonicalBytes calculates the normative lock bytes without I/O.

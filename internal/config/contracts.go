@@ -271,6 +271,11 @@ func validateAssertionOperand(v *validator, key string, op AssertionOp, value Ty
 }
 
 func locateContractTable(input []byte, id string) (int, int) {
+	for _, occurrence := range predicateOccurrences("", input) {
+		if occurrence.id == id {
+			return occurrence.position.Line, occurrence.position.Column
+		}
+	}
 	for lineNumber, line := range strings.Split(string(input), "\n") {
 		trimmed := strings.TrimSpace(line)
 		const prefix = "[contracts."

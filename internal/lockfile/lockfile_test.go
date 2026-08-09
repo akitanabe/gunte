@@ -3,6 +3,7 @@ package lockfile
 import (
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -45,6 +46,14 @@ func TestCanonicalBytesUseNormativeOrderEscapingAndValidatedContractData(t *test
 	}
 	if string(got) != want {
 		t.Fatalf("canonical bytes = %s\nwant = %s", got, want)
+	}
+}
+
+func TestSemanticInputPathsTrackSelectedContractFileOrder(t *testing.T) {
+	project := config.ProjectConfig{ContractFiles: []string{"rules/b.toml", "rules/a.toml"}, Project: config.Project{VersionFrom: "VERSION"}, Sources: config.Sources{Files: []string{"src/a.md"}}}
+	want := []string{"gunte.toml", "rules/b.toml", "rules/a.toml", "VERSION", "src/a.md"}
+	if got := SemanticInputPaths(project); !reflect.DeepEqual(got, want) {
+		t.Fatalf("SemanticInputPaths() = %v, want %v", got, want)
 	}
 }
 

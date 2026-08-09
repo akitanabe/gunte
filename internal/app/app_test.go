@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -773,6 +774,90 @@ func TestInvalidValidationDoesNotCreateLock(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, "gunte.lock.json")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("lock writer reached: %v", err)
 		}
+	}
+}
+
+func TestExplicitContractFilesAreTheOnlyRegistryInputs(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	projectPath := filepath.Join(root, "gunte.toml")
+	projectBytes, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectBytes = bytes.Replace(projectBytes, []byte("[sources]"), []byte("[contracts]\nfiles = [\"rules/a.toml\", \"rules/b.toml\"]\n[sources]"), 1)
+	if err := os.WriteFile(projectPath, projectBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"rules/a.toml", "rules/b.toml"} {
+		if err := os.WriteFile(filepath.Join(root, path), []byte("[contracts]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte("not valid toml ="), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writer := &recordingWriter{}
+	if result := newRunnerWithWriter(root, writer).Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("explicit registry = %#v", result)
+	}
+	if err := os.Remove(filepath.Join(root, "rules", "b.toml")); err != nil {
+		t.Fatal(err)
+	}
+	writer = &recordingWriter{}
+	result := newRunnerWithWriter(root, writer).Run([]string{"emit"})
+	if result.ExitCode != ExitFailure || !hasDiagnosticPath(result, "load_error", "rules/b.toml") || writer.count != 0 {
+		t.Fatalf("missing registry = %#v, writes = %d", result, writer.count)
+	}
+}
+
+func TestInvalidSelectedContractDoesNotReachArtifactOrLockWriters(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte("[contracts.bad]\nkind = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := &recordingWriter{}
+	locks := &recordingWriter{}
+	result := newRunnerWithWriters(root, artifacts, locks).Run([]string{"lock"})
+	if result.ExitCode != ExitFailure || artifacts.count != 0 || locks.count != 0 {
+		t.Fatalf("result = %#v, artifact writes = %d, lock writes = %d", result, artifacts.count, locks.count)
+	}
+}
+
+func TestTopLevelInlineContractViolationUsesPredicatePosition(t *testing.T) {
+	contracts := `contracts = { ban = { kind = "forbids", pattern = "hello", applies_to = ["one"] } }
+`
+	root := writeProject(t, projectFixture{targets: []targetFixture{{id: "one", root: "out"}}, contracts: contracts})
+	result := newRunnerWithWriter(root, &recordingWriter{}).Run([]string{"emit"})
+	if result.ExitCode != ExitFailure || len(result.Diagnostics) != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	diagnostic := result.Diagnostics[0]
+	if diagnostic.Kind != "forbids_violation" || diagnostic.Path != "contracts.toml" || diagnostic.Line != 1 || diagnostic.Column != strings.Index(contracts, "ban")+1 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestSourceInventoryExpectsEverySelectedContractFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "registry"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"registry/a.toml", "registry/b.toml"} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte("[contracts]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project := config.ProjectConfig{ContractFiles: []string{"registry/a.toml", "registry/b.toml"}, Sources: config.Sources{ManagedRoots: []string{"registry"}}}
+	if diagnostics := NewRunner(root).checkInventory(project, nil, ""); len(diagnostics) != 0 {
+		t.Fatalf("inventory diagnostics = %#v", diagnostics)
+	}
+	project.ContractFiles = []string{"registry/a.toml"}
+	diagnostics := NewRunner(root).checkInventory(project, nil, "")
+	if len(diagnostics) != 1 || diagnostics[0].Kind != "inventory_mismatch" || diagnostics[0].Path != "registry/b.toml" {
+		t.Fatalf("unselected contract diagnostics = %#v", diagnostics)
 	}
 }
 

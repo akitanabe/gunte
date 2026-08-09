@@ -1037,6 +1037,229 @@ applies_to = ["one"]
 	}
 }
 
+func TestSpecVersionTwoSelectsContractFiles(t *testing.T) {
+	base := `spec_version = 2
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+[targets.one]
+output_root = "out"
+`
+	project, diagnostics := ParseProject("gunte.toml", []byte(base))
+	if len(diagnostics) != 0 || !reflect.DeepEqual(project.ContractFiles, []string{"contracts.toml"}) {
+		t.Fatalf("default contracts = %#v, %v", project.ContractFiles, diagnostics)
+	}
+	explicit := strings.Replace(base, "[sources]", "[contracts]\nfiles = [\"rules/a.toml\", \"rules/b.toml\"]\n[sources]", 1)
+	project, diagnostics = ParseProject("gunte.toml", []byte(explicit))
+	if len(diagnostics) != 0 || !reflect.DeepEqual(project.ContractFiles, []string{"rules/a.toml", "rules/b.toml"}) {
+		t.Fatalf("explicit contracts = %#v, %v", project.ContractFiles, diagnostics)
+	}
+}
+
+func TestContractFileSelectionRejectsInvalidValuesAndRemainsV1Closed(t *testing.T) {
+	base := `spec_version = 2
+[project]
+id = "p"
+version = "v"
+[contracts]
+files = VALUE
+[sources]
+files = ["src/a.md"]
+[targets.one]
+output_root = "out"
+`
+	tests := []struct{ value, message string }{
+		{`[]`, "contracts.files must contain at least one path"},
+		{`[1]`, "contracts.files[0] must be a string"},
+		{`["../a.toml"]`, "contracts.files[0] must not contain . or .. path segments"},
+		{`["a.toml", "a.toml"]`, "duplicate contract path a.toml"},
+	}
+	for _, test := range tests {
+		_, diagnostics := ParseProject("gunte.toml", []byte(strings.Replace(base, "VALUE", test.value, 1)))
+		assertDiagnostic(t, diagnostics, test.message)
+	}
+	v1 := strings.Replace(strings.Replace(base, "spec_version = 2", "spec_version = 1", 1), "version = \"v\"", "version = \"v\"", 1)
+	_, diagnostics := ParseProject("gunte.toml", []byte(strings.Replace(v1, "VALUE", `["a.toml"]`, 1)))
+	assertDiagnostic(t, diagnostics, "unknown key contracts")
+}
+
+func TestParseContractDocumentsMergesInFileAndDeclarationOrder(t *testing.T) {
+	documents := []ContractDocument{
+		{Path: "a.toml", Bytes: []byte("[contracts.first]\nkind = \"forbids\"\npattern = \"a\"\napplies_to = [\"one\"]\n")},
+		{Path: "b.toml", Bytes: []byte("[contracts.second]\nkind = \"forbids\"\npattern = \"b\"\napplies_to = [\"one\"]\n")},
+	}
+	registry, diagnostics := ParseContractDocuments(documents, []string{"one"}, 2)
+	if len(diagnostics) != 0 || len(registry.Contracts) != 2 || registry.Contracts[0].ID != "first" || registry.Contracts[1].ID != "second" {
+		t.Fatalf("registry = %#v, diagnostics = %#v", registry, diagnostics)
+	}
+}
+
+func TestParseContractDocumentsReportsGlobalDuplicateAtLaterDeclaration(t *testing.T) {
+	documents := []ContractDocument{
+		{Path: "a.toml", Bytes: []byte("[contracts.same]\nkind = \"forbids\"\npattern = \"a\"\napplies_to = [\"one\"]\n")},
+		{Path: "b.toml", Bytes: []byte("\n[contracts.same]\nkind = \"forbids\"\npattern = \"b\"\napplies_to = [\"one\"]\n")},
+	}
+	_, diagnostics := ParseContractDocuments(documents, []string{"one"}, 2)
+	diagnostic := findDiagnostic(t, diagnostics, "duplicate predicate same")
+	if diagnostic.Path != "b.toml" || diagnostic.Line != 2 || len(diagnostic.Related) != 1 || diagnostic.Related[0].Path != "a.toml" {
+		t.Fatalf("duplicate diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestContractDeclarationsPreserveSupportedFormsAndPositions(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		line  int
+	}{
+		{"header", `[contracts.header]
+kind = "forbids"
+pattern = "x"
+applies_to = ["one"]
+`, 1},
+		{"quoted header", `[contracts."quoted"]
+kind = "forbids"
+pattern = "x"
+applies_to = ["one"]
+`, 1},
+		{"inline", `contracts = { inline = { kind = "forbids", pattern = "x", applies_to = ["one"] } }
+`, 1},
+		{"dotted", `contracts.dotted.kind = "forbids"
+contracts.dotted.pattern = "x"
+contracts.dotted.applies_to = ["one"]
+`, 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry, diagnostics := ParseContractDocuments([]ContractDocument{{Path: test.name + ".toml", Bytes: []byte(test.input)}}, []string{"one"}, 2)
+			if len(diagnostics) != 0 || len(registry.Contracts) != 1 || registry.Contracts[0].Position.Line != test.line {
+				t.Fatalf("registry = %#v, diagnostics = %#v", registry, diagnostics)
+			}
+		})
+	}
+}
+
+func TestTopLevelInlinePredicateAndFieldPositionsAreExact(t *testing.T) {
+	input := []byte(`contracts = { first = { kind = "forbids", pattern = "x", applies_to = ["one"] }, "second" = { kind = "forbids", pattern = " invalid, # literal ", applies_to = ["one"] } }
+`)
+	registry, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "inline.toml", Bytes: input}}, []string{"one"}, 2)
+	if len(registry.Contracts) != 2 {
+		t.Fatalf("registry = %#v, diagnostics = %#v", registry, diagnostics)
+	}
+	if registry.Contracts[0].Position.Column != strings.Index(string(input), "first")+1 || registry.Contracts[1].Position.Column != strings.Index(string(input), `"second"`)+1 {
+		t.Fatalf("positions = %#v, %#v", registry.Contracts[0].Position, registry.Contracts[1].Position)
+	}
+	diagnostic := findDiagnostic(t, diagnostics, "pattern must not have leading or trailing whitespace")
+	if diagnostic.Path != "inline.toml" || diagnostic.Line != 1 || diagnostic.Column != strings.LastIndex(string(input), "pattern")+1 {
+		t.Fatalf("field diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestTopLevelInlineDuplicateUsesLaterPrimaryAndGlobalFirstRelated(t *testing.T) {
+	input := []byte(`contracts = { same = { kind = "forbids", pattern = "a", applies_to = ["one"] }, same = { kind = "forbids", pattern = "b", applies_to = ["one"] } }
+`)
+	_, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "inline.toml", Bytes: input}}, []string{"one"}, 2)
+	diagnostic := findDiagnostic(t, diagnostics, "duplicate predicate same")
+	if diagnostic.Path != "inline.toml" || diagnostic.Column != strings.LastIndex(string(input), "same")+1 || len(diagnostic.Related) != 1 || diagnostic.Related[0].Column != strings.Index(string(input), "same")+1 {
+		t.Fatalf("duplicate diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestSecondStructureAssertionFieldDiagnosticUsesItsOwnPosition(t *testing.T) {
+	input := []byte(`[contracts.first]
+kind = "structure"
+subject = "source_frontmatter"
+paths = ["src/a.md"]
+[[contracts.first.assertions]]
+path = "name"
+op = "exists"
+
+[contracts.second]
+kind = "structure"
+subject = "source_frontmatter"
+paths = ["src/b.md"]
+[[contracts.second.assertions]]
+path = "name"
+op = "invalid"
+`)
+	_, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "structure.toml", Bytes: input}}, []string{"one"}, 2)
+	diagnostic := findDiagnostic(t, diagnostics, "unknown assertion op")
+	if diagnostic.Line != 15 || diagnostic.Column != 1 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestCrossFileDuplicatesAlwaysRelateToGlobalFirstInlinePredicate(t *testing.T) {
+	documents := []ContractDocument{
+		{Path: "a.toml", Bytes: []byte(`contracts = { same = { kind = "forbids", pattern = "a", applies_to = ["one"] } }`)},
+		{Path: "b.toml", Bytes: []byte(`contracts = { same = { kind = "forbids", pattern = "b", applies_to = ["one"] }, same = { kind = "forbids", pattern = "c", applies_to = ["one"] } }`)},
+	}
+	_, diagnostics := ParseContractDocuments(documents, []string{"one"}, 2)
+	duplicates := make([]Diagnostic, 0)
+	for _, diagnostic := range diagnostics {
+		if strings.Contains(diagnostic.Message, "duplicate predicate same") {
+			duplicates = append(duplicates, diagnostic)
+		}
+	}
+	if len(duplicates) != 2 {
+		t.Fatalf("duplicates = %#v; all diagnostics = %#v", duplicates, diagnostics)
+	}
+	for _, diagnostic := range duplicates {
+		if diagnostic.Path != "b.toml" || len(diagnostic.Related) != 1 || diagnostic.Related[0].Path != "a.toml" || diagnostic.Related[0].Column != 15 {
+			t.Fatalf("duplicate = %#v", diagnostic)
+		}
+	}
+}
+
+func TestDottedImplicitThenFirstExplicitIsOnePredicateButSecondExplicitIsDuplicate(t *testing.T) {
+	input := []byte(`contracts.same.kind = "forbids"
+contracts.same.pattern = "x"
+contracts.same.applies_to = ["one"]
+[contracts.same]
+[contracts.same]
+`)
+	_, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "same.toml", Bytes: input}}, []string{"one"}, 2)
+	duplicate := findDiagnostic(t, diagnostics, "duplicate predicate same")
+	if duplicate.Line != 5 || duplicate.Related[0].Line != 1 {
+		t.Fatalf("duplicate = %#v", duplicate)
+	}
+}
+
+func TestContractPositionIndexIgnoresCommentsAndMultilineStringDecoys(t *testing.T) {
+	input := []byte(`[contracts.real]
+kind = "forbids"
+pattern = """\
+[contracts.fake]\
+"""
+# [contracts.also_fake]
+applies_to = ["one"]
+`)
+	registry, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "decoy.toml", Bytes: input}}, []string{"one"}, 2)
+	if len(diagnostics) != 0 || len(registry.Contracts) != 1 || registry.Contracts[0].ID != "real" || registry.Contracts[0].Position.Line != 1 {
+		t.Fatalf("registry = %#v, diagnostics = %#v", registry, diagnostics)
+	}
+}
+
+func TestContractFieldDiagnosticIsScopedToItsPredicate(t *testing.T) {
+	input := []byte(`[contracts.first]
+kind = "forbids"
+pattern = "valid"
+applies_to = ["one"]
+
+[contracts.second]
+kind = "forbids"
+pattern = " invalid "
+applies_to = ["one"]
+`)
+	_, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "fields.toml", Bytes: input}}, []string{"one"}, 2)
+	diagnostic := findDiagnostic(t, diagnostics, "pattern must not have leading or trailing whitespace")
+	if diagnostic.Line != 8 || diagnostic.Column != 1 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+}
+
 func assertDiagnostic(t *testing.T, diagnostics []Diagnostic, message string) {
 	t.Helper()
 	findDiagnostic(t, diagnostics, message)

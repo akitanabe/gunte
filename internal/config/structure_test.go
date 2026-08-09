@@ -142,6 +142,21 @@ applies_to = ["codex"]
 	if len(diagnostics) == 0 {
 		t.Fatal("v1 accepted occurrences")
 	}
+	for _, field := range []string{"paths", "exclude_paths"} {
+		input := "[contracts.ban]\nkind = \"forbids\"\npattern = \"x\"\n" + field + " = [\"out/*.md\"]\napplies_to = [\"codex\"]\n"
+		_, diagnostics := ParseContractsForSpec("contracts.toml", []byte(input), []string{"codex"}, 1)
+		found := false
+		for _, diagnostic := range diagnostics {
+			fieldColumn := strings.Index(strings.Split(input, "\n")[3], field) + 1
+			if strings.Contains(diagnostic.Message, "contracts.ban."+field) && diagnostic.Line == 4 && diagnostic.Column == fieldColumn {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("v1 accepted forbids %s or did not own its diagnostic: %#v", field, diagnostics)
+		}
+	}
 }
 
 func TestV2SelectorGrammarRejectsFiniteNegativeCasesForTextScopes(t *testing.T) {

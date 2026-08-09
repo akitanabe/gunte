@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/akitanabe/gunte/internal/adapter"
 	"github.com/akitanabe/gunte/internal/cli"
@@ -440,6 +441,16 @@ func inventoryKind(mode os.FileMode) inventory.Kind {
 func (runner Runner) emit(artifacts []serialize.Artifact) Result {
 	result := Result{ExitCode: ExitSuccess}
 	for _, artifact := range artifacts {
+		if err := runner.rejectSymlinkPath(artifact.Path); err != nil {
+			return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{pathSafetyDiagnostic(artifact.Path, err)}}
+		}
+	}
+	for _, artifact := range artifacts {
+		// The all-artifacts preflight cannot close a later replacement window, so
+		// retain this boundary check immediately before each write.
+		if err := runner.rejectSymlinkPath(artifact.Path); err != nil {
+			return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{pathSafetyDiagnostic(artifact.Path, err)}}
+		}
 		if err := runner.writer.Write(artifact.Path, artifact.Bytes); err != nil {
 			result.ExitCode = ExitFailure
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Kind: "write_error", Path: artifact.Path, Message: err.Error()})
@@ -452,6 +463,10 @@ func (runner Runner) emit(artifacts []serialize.Artifact) Result {
 func (runner Runner) check(artifacts []serialize.Artifact) Result {
 	result := Result{ExitCode: ExitSuccess}
 	for _, artifact := range artifacts {
+		if err := runner.rejectSymlinkPath(artifact.Path); err != nil {
+			result.Diagnostics = append(result.Diagnostics, pathSafetyDiagnostic(artifact.Path, err))
+			continue
+		}
 		data, err := runner.read(artifact.Path)
 		if diagnostic, failed := compareOutput(outputComparison{Path: artifact.Path, Expected: artifact.Bytes, Actual: data, Err: err}); failed {
 			result.Diagnostics = append(result.Diagnostics, diagnostic)
@@ -465,6 +480,40 @@ func (runner Runner) check(artifacts []serialize.Artifact) Result {
 
 func (runner Runner) read(relative string) ([]byte, error) {
 	return runner.reader.ReadFile(filepath.Join(runner.root, filepath.FromSlash(relative)))
+}
+
+var errPathSymlink = errors.New("artifact path contains symlink")
+
+func (runner Runner) rejectSymlinkPath(relative string) error {
+	return rejectSymlinkComponents(runner.root, relative, runner.dirs.Lstat)
+}
+
+func rejectSymlinkComponents(root, relative string, lstat func(string) (os.FileInfo, error)) error {
+	current := root
+	for _, component := range strings.Split(filepath.FromSlash(relative), string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: %s", errPathSymlink, current)
+		}
+	}
+	return nil
+}
+
+func pathSafetyDiagnostic(path string, err error) Diagnostic {
+	if errors.Is(err, errPathSymlink) {
+		return Diagnostic{Kind: "path_symlink", Path: path, Message: errPathSymlink.Error()}
+	}
+	return Diagnostic{Kind: "path_error", Path: path, Message: err.Error()}
 }
 
 func containsTarget(project config.ProjectConfig, id string) bool {
@@ -560,8 +609,14 @@ type localWriter struct {
 }
 
 func (writer localWriter) Write(path string, data []byte) error {
+	if err := rejectSymlinkComponents(writer.root, path, os.Lstat); err != nil {
+		return err
+	}
 	abs := filepath.Join(writer.root, filepath.FromSlash(path))
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return err
+	}
+	if err := rejectSymlinkComponents(writer.root, path, os.Lstat); err != nil {
 		return err
 	}
 	return os.WriteFile(abs, data, 0o644)

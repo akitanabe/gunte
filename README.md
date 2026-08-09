@@ -106,6 +106,14 @@ gunte-windows-arm64.exe
 scripts/build-release.sh /tmp/gunte-release
 ```
 
+GitHub Releaseへ添付するarchiveとchecksumもローカルで生成できます。
+
+```sh
+scripts/package-release.sh
+```
+
+macOS / Linux向けには`.tar.gz`、Windows向けには`.zip`を生成し、全6 archiveの`SHA256SUMS`とともに`dist/`へ出力します。第1引数による出力先の変更方法は`build-release.sh`と同じです。
+
 ## クイックスタート
 
 Gunteは、実行時のcurrent working directoryをproject rootとして扱います。次の3ファイルを用意します。

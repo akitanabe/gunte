@@ -29,7 +29,7 @@ func ValidateRegistryIntegrity(specVersion int, registry config.ContractRegistry
 	var diagnostics []source.Diagnostic
 	for _, predicate := range registry.Contracts {
 		switch predicate.Kind {
-		case config.PredicateRequires, config.PredicateForbids:
+		case config.PredicateRequires, config.PredicateForbids, config.PredicateOccurrences:
 			if predicate.Slice == "" {
 				continue
 			}

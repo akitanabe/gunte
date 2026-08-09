@@ -141,6 +141,23 @@ func TestRunExecutesValidRequestOnceAndPropagatesExitCode(t *testing.T) {
 	}
 }
 
+func TestOccurrenceDiagnosticWritesCountsToStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	actual, expected := int64(1), int64(2)
+	code := run(
+		[]string{"emit"},
+		func() (string, error) { return "/project", nil },
+		func(string, cli.ExecuteRequest) app.Result {
+			return app.Result{ExitCode: app.ExitFailure, Diagnostics: []app.Diagnostic{{Kind: "occurrences_violation", Path: "contracts.toml", Line: 4, Column: 1, ArtifactPath: "out/a.md", ActualCount: &actual, ExpectedCount: &expected, Message: "predicate count failed for target one: expected count 2, actual count 1"}}}
+		},
+		&stdout,
+		&stderr,
+	)
+	if code != app.ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "expected count 2, actual count 1") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestBinaryExecuteFailureUsesStderrAndExitOne(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {

@@ -220,12 +220,12 @@ gunte check --target codex
 | `[sources].managed_roots` | v2専用。`check`がsource inventoryを検査するproject相対root |
 | `[sources].allow_files`, `[sources].allow_dirs` | v2専用。managed root内で生成入力以外に許可するpath |
 | `[terms.<name>].<target>` | 任意の用語定義。宣言した場合は全targetの非空・単一行の値が必要 |
-| `[targets.<id>].output_root` | 必須。targetの出力root |
+| `[targets.<id>].output_root` | 必須。targetの出力root。v2だけは`.`でrepository rootを指定可能 |
 | `[targets.<id>].managed_roots` | v2専用。`check`がoutput inventoryを検査する`output_root`相対root |
 | `[targets.<id>].allow_files`, `[targets.<id>].allow_dirs` | v2専用。managed root内で生成物以外に許可するpath |
 | `[[targets.<id>.rules]]` | sourceからartifactへの変換rule |
 
-pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`、backslash、NULは使用できません。`sources.files`にないファイルはsourceとして処理されません。v2の`check`は、managed root内にある未宣言・未許可のpathをinventory mismatchとして検出します。
+pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`、backslash、NULは使用できません。例外としてv2の`output_root = "."`だけはrepository rootを表します。root targetでも`managed_roots`の省略はrepository rootを所有せず、明示したsubrootだけをinventory検査します。`sources.files`にないファイルはsourceとして処理されません。v2の`check`は、managed root内にある未宣言・未許可のpathをinventory mismatchとして検出します。
 
 ### rule matchingと出力path
 
@@ -233,7 +233,7 @@ pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`
 - wildcardは`*`だけです。`/`を跨がず、`**`に特別な意味はありません。
 - `path`では、`match`内の各`*`を宣言順に`{1}`〜`{9}`で参照します。
 - 同じsourceが同一target内の複数ruleに一致するとエラーです。
-- `output_root + "/" + path`が別artifactまたはsemantic inputと一致するとエラーです。
+- root sentinelでは`path`、それ以外では`output_root + "/" + path`を出力pathとします。全targetの出力pathはtarget選択前に検証され、別targetのartifact、semantic input、`gunte.lock.json`またはそのdescendantと一致するとエラーです。
 - v2のsemantic inputは`gunte.toml`、選択した全contract file、`version_from`、`sources.files`の順で最初の出現だけを採用します。選択したcontract fileはsource inventoryとartifact collisionにも同じ順序・集合で反映されます。
 
 ### 出力profile
@@ -311,12 +311,13 @@ backtickまたはtildeを3文字以上使うfenced code block内では、directi
 
 ## 契約
 
-`requires`、`forbids`、`order`では`applies_to`が必須です。`slice`、`before`、`after`は、各targetで実際に出力されるspanまたはanchorへ解決できる必要があります。v2の`structure`では、artifactを検査するときだけ`applies_to`が必須で、`source_frontmatter`を検査するときは指定できません。assertionを含む詳細は[v2正本仕様](docs/gunte-spec.md#v2-03-typed-structural-contract)を参照してください。
+`requires`、`forbids`、`occurrences`、`order`では`applies_to`が必須です。`slice`、`before`、`after`は、各targetで実際に出力されるspanまたはanchorへ解決できる必要があります。v2の`structure`では、artifactを検査するときだけ`applies_to`が必須で、`source_frontmatter`を検査するときは指定できません。assertionを含む詳細は[v2正本仕様](docs/gunte-spec.md#v2-03-typed-structural-contract)を参照してください。
 
 | `kind` | 必須設定 | 成立条件 |
 |---|---|---|
 | `requires` | `slice`, `pattern`, `applies_to` | spanの出力bytesにpatternが1回以上一致する。空spanは不成立 |
 | `forbids` | `pattern`, `applies_to` | patternが一致しない。任意の`slice`を省略するとtargetの全artifactを検査する。空spanは不成立 |
+| `occurrences` | `pattern`, `count`, `paths`, `applies_to` | 選択した各artifact、または`slice`を指定したspanで、patternのnon-overlap一致数がcountと一致する。sliceなしではpathsは非空必須、sliceありではselector不可 |
 | `order` | `before`, `after`, `applies_to` | 2つのspan / anchorが同じartifactにあり、`before`の位置が`after`より前 |
 
 patternはUTF-8の大小を区別します。pattern内の連続するspace、tab、LFは、出力内の1文字以上のASCII空白列に一致します。pattern端がASCII識別子文字の場合は識別子境界も検査するため、たとえば`implementer`は`senior-implementer`内のsuffixには一致しません。

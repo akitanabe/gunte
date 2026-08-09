@@ -10,6 +10,8 @@ import (
 
 	"github.com/akitanabe/gunte/internal/compile"
 	"github.com/akitanabe/gunte/internal/config"
+	"github.com/akitanabe/gunte/internal/lockfile"
+	"github.com/akitanabe/gunte/internal/outputpath"
 )
 
 type matchDecision struct {
@@ -47,8 +49,22 @@ func UnmatchedSourcePaths(project config.ProjectConfig, sources []Source) []stri
 // pure calculation: all returned byte slices and lists are independent copies
 // of the supplied input data.
 func Adapt(project config.ProjectConfig, sources []Source) (Result, []Diagnostic) {
+	plan, diagnostics := Preflight(project, sources)
+	result := Result{Artifacts: make([]Artifact, 0)}
+	for targetIndex := range project.Targets {
+		adapted, targetDiagnostics := AdaptTarget(project, targetIndex, sources, plan)
+		result.Artifacts = append(result.Artifacts, adapted.Artifacts...)
+		diagnostics = append(diagnostics, targetDiagnostics...)
+	}
+	return result, diagnostics
+}
+
+// Preflight resolves rule matches and validates every expanded output path for
+// every target without resolving metadata or serializing profiles.
+func Preflight(project config.ProjectConfig, sources []Source) (PathPlan, []Diagnostic) {
 	decisions := make([][]*matchDecision, len(sources))
 	diagnostics := make([]Diagnostic, 0)
+	plan := PathPlan{Artifacts: make([]PlannedArtifact, 0)}
 	for sourceIndex, source := range sources {
 		decisions[sourceIndex] = make([]*matchDecision, len(project.Targets))
 		matchedTarget := false
@@ -78,6 +94,7 @@ func Adapt(project config.ProjectConfig, sources []Source) (Result, []Diagnostic
 			}
 		}
 		if !matchedTarget {
+			plan.UnmatchedSources = append(plan.UnmatchedSources, sourcePath)
 			diagnostics = append(diagnostics, Diagnostic{
 				Code:     "unmatched_source",
 				Severity: SeverityWarning,
@@ -87,8 +104,8 @@ func Adapt(project config.ProjectConfig, sources []Source) (Result, []Diagnostic
 		}
 	}
 
-	result := Result{Artifacts: make([]Artifact, 0)}
-	seenPaths := make(map[string]struct{})
+	sort.Strings(plan.UnmatchedSources)
+	seenOutputPaths := make(map[string]int)
 	semanticInputs := semanticInputPaths(project)
 	for targetIndex, target := range project.Targets {
 		for sourceIndex, decision := range decisions {
@@ -122,8 +139,9 @@ func Adapt(project config.ProjectConfig, sources []Source) (Result, []Diagnostic
 				})
 				continue
 			}
-			fullPath := target.OutputRoot + "/" + artifactPath
-			if _, exists := seenPaths[fullPath]; exists || semanticInputs[fullPath] {
+			fullPath := outputpath.Join(target.OutputRoot, artifactPath)
+			_, duplicate := seenOutputPaths[fullPath]
+			if duplicate || semanticInputs[fullPath] || lockfile.Reserves(fullPath) {
 				diagnostics = append(diagnostics, Diagnostic{
 					Code:     "path_collision",
 					Severity: SeverityError,
@@ -134,13 +152,45 @@ func Adapt(project config.ProjectConfig, sources []Source) (Result, []Diagnostic
 				})
 				continue
 			}
-			artifact, metadataDiagnostics, ok := buildArtifact(project, target, rule, ruleIndex, source, sourcePath, fullPath)
-			diagnostics = append(diagnostics, metadataDiagnostics...)
-			if ok {
-				seenPaths[fullPath] = struct{}{}
-				result.Artifacts = append(result.Artifacts, artifact)
+			if !duplicate {
+				seenOutputPaths[fullPath] = targetIndex
 			}
+			plan.Artifacts = append(plan.Artifacts, PlannedArtifact{TargetIndex: targetIndex, SourceIndex: sourceIndex, RuleIndex: ruleIndex, Path: fullPath})
 		}
+	}
+	return plan, diagnostics
+}
+
+// AdaptTarget resolves metadata for one target using only preflight decisions.
+func AdaptTarget(project config.ProjectConfig, targetIndex int, sources []Source, plan PathPlan) (Result, []Diagnostic) {
+	result := Result{Artifacts: make([]Artifact, 0)}
+	diagnostics := make([]Diagnostic, 0)
+	seenPaths := make(map[string]struct{})
+	if targetIndex < 0 || targetIndex >= len(project.Targets) {
+		return result, []Diagnostic{{Code: "missing_target", Severity: SeverityError, Message: "target index is outside project targets"}}
+	}
+	target := project.Targets[targetIndex]
+	for _, decision := range plan.Artifacts {
+		if decision.TargetIndex != targetIndex {
+			continue
+		}
+		if decision.SourceIndex < 0 || decision.SourceIndex >= len(sources) || decision.RuleIndex < 0 || decision.RuleIndex >= len(target.Rules) {
+			diagnostics = append(diagnostics, Diagnostic{Code: "invalid_path_plan", Severity: SeverityError, Target: target.ID, Message: "path plan index is outside adapter input"})
+			continue
+		}
+		source := sources[decision.SourceIndex]
+		sourcePath := sourcePath(source)
+		artifact, metadataDiagnostics, ok := buildArtifact(project, target, target.Rules[decision.RuleIndex], decision.RuleIndex, source, sourcePath, decision.Path)
+		diagnostics = append(diagnostics, metadataDiagnostics...)
+		if !ok {
+			continue
+		}
+		if _, duplicate := seenPaths[decision.Path]; duplicate {
+			diagnostics = append(diagnostics, Diagnostic{Code: "path_collision", Severity: SeverityError, Source: sourcePath, Target: target.ID, Rule: decision.RuleIndex, Message: "artifact path collides with another artifact or semantic input"})
+			continue
+		}
+		seenPaths[decision.Path] = struct{}{}
+		result.Artifacts = append(result.Artifacts, artifact)
 	}
 	return result, diagnostics
 }

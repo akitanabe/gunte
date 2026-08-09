@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/akitanabe/gunte/internal/adapter"
 	"github.com/akitanabe/gunte/internal/cli"
@@ -19,6 +20,7 @@ import (
 	"github.com/akitanabe/gunte/internal/inventory"
 	"github.com/akitanabe/gunte/internal/lexer"
 	"github.com/akitanabe/gunte/internal/lockfile"
+	"github.com/akitanabe/gunte/internal/outputpath"
 	"github.com/akitanabe/gunte/internal/serialize"
 	"github.com/akitanabe/gunte/internal/source"
 	"github.com/akitanabe/gunte/internal/structure"
@@ -35,13 +37,15 @@ const (
 // path. ArtifactPath identifies the affected output artifact, Related preserves
 // source locations in order, and Line/Column use one-origin coordinates.
 type Diagnostic struct {
-	Kind         string
-	Path         string
-	Line         int
-	Column       int
-	ArtifactPath string
-	Related      []Location
-	Message      string
+	Kind          string
+	Path          string
+	Line          int
+	Column        int
+	ArtifactPath  string
+	Related       []Location
+	ActualCount   *int64
+	ExpectedCount *int64
+	Message       string
 }
 
 // Location identifies a project-relative source position with one-origin line
@@ -156,7 +160,7 @@ func (runner Runner) Execute(request cli.ExecuteRequest) Result {
 	if failures := structure.EvaluateSources(registry, sourceDocuments); len(failures) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: structureFailureResults(failures)}
 	}
-	artifacts, diagnostics := runner.generate(project, projection, units, selected)
+	artifacts, unmatchedSources, diagnostics := runner.generate(project, projection, units, selected)
 	if len(diagnostics) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: diagnostics}
 	}
@@ -172,25 +176,25 @@ func (runner Runner) Execute(request cli.ExecuteRequest) Result {
 	}
 	lockBytes := calculateLock(project, registry, units)
 	if command == "lock" {
-		if err := runner.lock.Write(filepath.Join(runner.root, "gunte.lock.json"), lockBytes); err != nil {
-			return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{{Kind: "write_error", Path: "gunte.lock.json", Message: err.Error()}}}
+		if err := runner.lock.Write(filepath.Join(runner.root, lockfile.Path), lockBytes); err != nil {
+			return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{{Kind: "write_error", Path: lockfile.Path, Message: err.Error()}}}
 		}
 		return Result{ExitCode: ExitSuccess}
 	}
 	if command == "check" {
 		result := runner.check(artifacts)
 		if project.SpecVersion == 2 {
-			for _, path := range adapter.UnmatchedSourcePaths(project, adapterSources(units)) {
+			for _, path := range unmatchedSources {
 				result.Diagnostics = append(result.Diagnostics, Diagnostic{Kind: "unmatched_source", Path: path, Message: "source does not match a rule in any target"})
 			}
 			result.Diagnostics = append(result.Diagnostics, runner.checkInventory(project, artifacts, selected)...)
 			if len(result.Diagnostics) != 0 {
 				result.ExitCode = ExitFailure
 			}
-			data, err := runner.read("gunte.lock.json")
-			if _, failed := compareOutput(outputComparison{Path: "gunte.lock.json", Expected: lockBytes, Actual: data, Err: err}); failed {
+			data, err := runner.read(lockfile.Path)
+			if _, failed := compareOutput(outputComparison{Path: lockfile.Path, Expected: lockBytes, Actual: data, Err: err}); failed {
 				result.ExitCode = ExitFailure
-				result.Diagnostics = append(result.Diagnostics, Diagnostic{Kind: "lock_mismatch", Path: "gunte.lock.json", Message: "full semantic lock is missing or differs"})
+				result.Diagnostics = append(result.Diagnostics, Diagnostic{Kind: "lock_mismatch", Path: lockfile.Path, Message: "full semantic lock is missing or differs"})
 			}
 		}
 		return result
@@ -280,30 +284,37 @@ func (runner Runner) loadSources(project config.ProjectConfig) ([]compile.Source
 	return units, diagnostics
 }
 
-func (runner Runner) generate(project config.ProjectConfig, projection compile.Result, units []compile.SourceUnit, selected string) ([]serialize.Artifact, []Diagnostic) {
+func (runner Runner) generate(project config.ProjectConfig, projection compile.Result, units []compile.SourceUnit, selected string) ([]serialize.Artifact, []string, []Diagnostic) {
 	var artifacts []serialize.Artifact
 	var diagnostics []Diagnostic
+	plan, preflightDiagnostics := adapter.Preflight(project, adapterSources(units))
+	for _, diagnostic := range preflightDiagnostics {
+		if diagnostic.Severity == adapter.SeverityError {
+			diagnostics = append(diagnostics, Diagnostic{Kind: diagnostic.Code, Path: diagnostic.Source, Message: diagnostic.Message})
+		}
+	}
+	if len(diagnostics) != 0 {
+		return nil, plan.UnmatchedSources, diagnostics
+	}
 	for targetIndex, target := range project.Targets {
 		if selected != "" && target.ID != selected {
 			continue
 		}
 		if targetIndex >= len(projection.Targets) {
-			return nil, []Diagnostic{{Kind: "compile_error", Path: target.ID, Message: "missing target projection"}}
+			return nil, plan.UnmatchedSources, []Diagnostic{{Kind: "compile_error", Path: target.ID, Message: "missing target projection"}}
 		}
-		targetProject := project
-		targetProject.Targets = []config.Target{target}
 		targetSources := make([]adapter.Source, len(units))
 		for sourceIndex, unit := range units {
 			targetSources[sourceIndex] = adapter.Source{Projection: projection.Targets[targetIndex].Sources[sourceIndex], Frontmatter: unit.Document.FrontmatterData}
 		}
-		adapted, adapterDiagnostics := adapter.Adapt(targetProject, targetSources)
+		adapted, adapterDiagnostics := adapter.AdaptTarget(project, targetIndex, targetSources, plan)
 		for _, diagnostic := range adapterDiagnostics {
 			if diagnostic.Severity == adapter.SeverityError {
 				diagnostics = append(diagnostics, Diagnostic{Kind: diagnostic.Code, Path: diagnostic.Source, Message: diagnostic.Message})
 			}
 		}
 		if len(diagnostics) != 0 {
-			return nil, diagnostics
+			return nil, plan.UnmatchedSources, diagnostics
 		}
 		for _, logical := range adapted.Artifacts {
 			serialized, serializeDiagnostics := serialize.Serialize(logical)
@@ -311,12 +322,12 @@ func (runner Runner) generate(project config.ProjectConfig, projection compile.R
 				for _, diagnostic := range serializeDiagnostics {
 					diagnostics = append(diagnostics, Diagnostic{Kind: diagnostic.Code, Path: diagnostic.Path, Message: diagnostic.Message})
 				}
-				return nil, diagnostics
+				return nil, plan.UnmatchedSources, diagnostics
 			}
 			artifacts = append(artifacts, serialized)
 		}
 	}
-	return artifacts, nil
+	return artifacts, plan.UnmatchedSources, nil
 }
 
 func adapterSources(units []compile.SourceUnit) []adapter.Source {
@@ -349,7 +360,7 @@ func (runner Runner) checkInventory(project config.ProjectConfig, artifacts []se
 			}
 		}
 		for _, root := range target.ManagedRoots {
-			fullRoot := target.OutputRoot + "/" + root
+			fullRoot := outputpath.Join(target.OutputRoot, root)
 			allowFiles := prefixPaths(target.OutputRoot, target.AllowFiles)
 			allowDirs := prefixPaths(target.OutputRoot, target.AllowDirs)
 			scope := inventory.Scope{Root: fullRoot, AllowFiles: allowFiles, AllowDirs: allowDirs}
@@ -372,7 +383,7 @@ func (runner Runner) checkInventory(project config.ProjectConfig, artifacts []se
 func prefixPaths(prefix string, paths []string) []string {
 	result := make([]string, len(paths))
 	for index, path := range paths {
-		result[index] = prefix + "/" + path
+		result[index] = outputpath.Join(prefix, path)
 	}
 	return result
 }
@@ -430,6 +441,16 @@ func inventoryKind(mode os.FileMode) inventory.Kind {
 func (runner Runner) emit(artifacts []serialize.Artifact) Result {
 	result := Result{ExitCode: ExitSuccess}
 	for _, artifact := range artifacts {
+		if err := runner.rejectSymlinkPath(artifact.Path); err != nil {
+			return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{pathSafetyDiagnostic(artifact.Path, err)}}
+		}
+	}
+	for _, artifact := range artifacts {
+		// The all-artifacts preflight cannot close a later replacement window, so
+		// retain this boundary check immediately before each write.
+		if err := runner.rejectSymlinkPath(artifact.Path); err != nil {
+			return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{pathSafetyDiagnostic(artifact.Path, err)}}
+		}
 		if err := runner.writer.Write(artifact.Path, artifact.Bytes); err != nil {
 			result.ExitCode = ExitFailure
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Kind: "write_error", Path: artifact.Path, Message: err.Error()})
@@ -442,6 +463,10 @@ func (runner Runner) emit(artifacts []serialize.Artifact) Result {
 func (runner Runner) check(artifacts []serialize.Artifact) Result {
 	result := Result{ExitCode: ExitSuccess}
 	for _, artifact := range artifacts {
+		if err := runner.rejectSymlinkPath(artifact.Path); err != nil {
+			result.Diagnostics = append(result.Diagnostics, pathSafetyDiagnostic(artifact.Path, err))
+			continue
+		}
 		data, err := runner.read(artifact.Path)
 		if diagnostic, failed := compareOutput(outputComparison{Path: artifact.Path, Expected: artifact.Bytes, Actual: data, Err: err}); failed {
 			result.Diagnostics = append(result.Diagnostics, diagnostic)
@@ -455,6 +480,40 @@ func (runner Runner) check(artifacts []serialize.Artifact) Result {
 
 func (runner Runner) read(relative string) ([]byte, error) {
 	return runner.reader.ReadFile(filepath.Join(runner.root, filepath.FromSlash(relative)))
+}
+
+var errPathSymlink = errors.New("artifact path contains symlink")
+
+func (runner Runner) rejectSymlinkPath(relative string) error {
+	return rejectSymlinkComponents(runner.root, relative, runner.dirs.Lstat)
+}
+
+func rejectSymlinkComponents(root, relative string, lstat func(string) (os.FileInfo, error)) error {
+	current := root
+	for _, component := range strings.Split(filepath.FromSlash(relative), string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: %s", errPathSymlink, current)
+		}
+	}
+	return nil
+}
+
+func pathSafetyDiagnostic(path string, err error) Diagnostic {
+	if errors.Is(err, errPathSymlink) {
+		return Diagnostic{Kind: "path_symlink", Path: path, Message: errPathSymlink.Error()}
+	}
+	return Diagnostic{Kind: "path_error", Path: path, Message: err.Error()}
 }
 
 func containsTarget(project config.ProjectConfig, id string) bool {
@@ -509,9 +568,20 @@ func contractDiagnosticResults(diagnostics []contract.Diagnostic) []Diagnostic {
 func violationResults(violations []contract.Violation) []Diagnostic {
 	result := make([]Diagnostic, len(violations))
 	for index, violation := range violations {
-		result[index] = Diagnostic{Kind: string(violation.Kind), Path: violation.Predicate.Path, Line: violation.Predicate.Line, Column: violation.Predicate.Column, ArtifactPath: violation.ArtifactPath, Related: locations(violation.RelatedSource), Message: fmt.Sprintf("predicate %s failed for target %s", violation.PredicateID, violation.TargetID)}
+		message := fmt.Sprintf("predicate %s failed for target %s", violation.PredicateID, violation.TargetID)
+		if violation.ActualCount != nil || violation.ExpectedCount != nil {
+			message = fmt.Sprintf("%s: expected count %s, actual count %s", message, countText(violation.ExpectedCount), countText(violation.ActualCount))
+		}
+		result[index] = Diagnostic{Kind: string(violation.Kind), Path: violation.Predicate.Path, Line: violation.Predicate.Line, Column: violation.Predicate.Column, ArtifactPath: violation.ArtifactPath, Related: locations(violation.RelatedSource), ActualCount: violation.ActualCount, ExpectedCount: violation.ExpectedCount, Message: message}
 	}
 	return result
+}
+
+func countText(value *int64) string {
+	if value == nil {
+		return "<none>"
+	}
+	return fmt.Sprintf("%d", *value)
 }
 
 func locations(positions []compile.SourcePosition) []Location {
@@ -539,8 +609,14 @@ type localWriter struct {
 }
 
 func (writer localWriter) Write(path string, data []byte) error {
+	if err := rejectSymlinkComponents(writer.root, path, os.Lstat); err != nil {
+		return err
+	}
 	abs := filepath.Join(writer.root, filepath.FromSlash(path))
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return err
+	}
+	if err := rejectSymlinkComponents(writer.root, path, os.Lstat); err != nil {
 		return err
 	}
 	return os.WriteFile(abs, data, 0o644)

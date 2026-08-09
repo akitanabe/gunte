@@ -158,6 +158,45 @@ profile = "markdown-v1"
 	}
 }
 
+func TestOutputRootAllowsRepositoryRootOnlyInSpecVersionTwo(t *testing.T) {
+	project := func(version int, root string) string {
+		versionValue := "version = \"v\""
+		if version == 2 {
+			versionValue = "version = \"v\""
+		}
+		return fmt.Sprintf(`spec_version = %d
+[project]
+id = "p"
+%s
+[sources]
+files = ["src/a.md"]
+[targets.one]
+output_root = %q
+[[targets.one.rules]]
+match = "src/*.md"
+path = "AGENTS.md"
+profile = "markdown-v1"
+`, version, versionValue, root)
+	}
+
+	if _, diagnostics := ParseProject("v2.toml", []byte(project(2, "."))); len(diagnostics) != 0 {
+		t.Fatalf("v2 root target diagnostics = %#v", diagnostics)
+	}
+	for _, test := range []struct {
+		name, input, want string
+	}{
+		{name: "v1 root", input: project(1, "."), want: "targets.one.output_root must not contain . or .. path segments"},
+		{name: "v2 empty", input: project(2, ""), want: "targets.one.output_root must be a relative slash-separated path"},
+		{name: "source path", input: strings.Replace(project(2, "."), `files = ["src/a.md"]`, `files = ["."]`, 1), want: "sources.files[0] must not contain . or .. path segments"},
+		{name: "managed root", input: strings.Replace(project(2, "."), `[targets.one]`, "[targets.one]\nmanaged_roots = [\".\"]", 1), want: "targets.one.managed_roots[0] must not contain . or .. path segments"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, diagnostics := ParseProject("case.toml", []byte(test.input))
+			assertDiagnostic(t, diagnostics, test.want)
+		})
+	}
+}
+
 func TestIdentifierGrammarAndOrderedSources(t *testing.T) {
 	targetCases := []struct {
 		id    string
@@ -1248,7 +1287,7 @@ func TestDiagnosticsPointToTheirOwnFields(t *testing.T) {
 	tests := []struct {
 		name, second, field, message string
 	}{
-		{"path", `{ path = "", op = "exists" }`, "path", "assertion path must"},
+		{"path", `{ path = ".", op = "exists" }`, "path", "assertion path must"},
 		{"value", `{ path = "name", op = "exists", value = "x" }`, "value", "value is not allowed for exists"},
 		{"count", `{ path = "name", op = "cardinality", count = -1 }`, "count", "count must be a non-negative integer"},
 	}

@@ -81,6 +81,31 @@ gunte 2>&1 || test $? -eq 2
 
 引数なしではusageを表示し、終了コード`2`を返します。
 
+### 配布用バイナリのローカル生成
+
+Linux、Windows、macOSのamd64 / arm64向けバイナリをまとめて生成します。
+
+```sh
+scripts/build-release.sh
+```
+
+`CGO_ENABLED=0`で`cmd/gunte`をcross compileし、次の単一バイナリを`dist/`へ出力します。
+
+```text
+gunte-darwin-amd64
+gunte-darwin-arm64
+gunte-linux-amd64
+gunte-linux-arm64
+gunte-windows-amd64.exe
+gunte-windows-arm64.exe
+```
+
+出力先を変える場合は第1引数でdirectoryを指定します。このコマンドは既存の出力先を削除しません。
+
+```sh
+scripts/build-release.sh /tmp/gunte-release
+```
+
 ## クイックスタート
 
 Gunteは、実行時のcurrent working directoryをproject rootとして扱います。次の3ファイルを用意します。

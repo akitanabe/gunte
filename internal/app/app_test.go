@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/akitanabe/gunte/internal/cli"
 	"github.com/akitanabe/gunte/internal/compile"
 	"github.com/akitanabe/gunte/internal/config"
 	"github.com/akitanabe/gunte/internal/contract"
@@ -28,6 +29,39 @@ func TestRunRejectsUsageAndUnknownTarget(t *testing.T) {
 	result := runner.Run([]string{"emit", "--target", "missing"})
 	if result.ExitCode != ExitFailure || !hasDiagnostic(result, "unknown_target") {
 		t.Fatalf("unknown target result = %#v", result)
+	}
+	result = runner.Run([]string{"emit", "--target", "--help"})
+	if result.ExitCode != ExitFailure || !hasDiagnostic(result, "unknown_target") {
+		t.Fatalf("help-shaped target result = %#v", result)
+	}
+}
+
+func TestRunHelpDoesNotReadProjectOrWriteArtifacts(t *testing.T) {
+	reader := &countingReader{}
+	writer := &recordingWriter{}
+	runner := newRunnerWithReader(t.TempDir(), reader, writer)
+	for _, args := range [][]string{{"--help"}, {"help", "emit"}, {"check", "--help"}} {
+		result := runner.Run(args)
+		if result.ExitCode != ExitSuccess || reader.count != 0 || writer.count != 0 {
+			t.Fatalf("Run(%v) = %#v reads=%d writes=%d", args, result, reader.count, writer.count)
+		}
+	}
+}
+
+func TestExecuteRejectsInvalidRequestBeforeProjectActions(t *testing.T) {
+	for _, request := range []cli.ExecuteRequest{
+		{Command: cli.Command("unknown")},
+		{Command: cli.CommandLock, Target: "one"},
+	} {
+		reader := &countingReader{}
+		writer := &recordingWriter{}
+		result := newRunnerWithReader(t.TempDir(), reader, writer).Execute(request)
+		if result.ExitCode != ExitUsage || len(result.Diagnostics) != 1 || result.Diagnostics[0].Message != cli.UsageMessage {
+			t.Errorf("Execute(%#v) = %#v, want usage", request, result)
+		}
+		if reader.count != 0 || writer.count != 0 {
+			t.Errorf("Execute(%#v) performed project actions: reads=%d writes=%d", request, reader.count, writer.count)
+		}
 	}
 }
 
@@ -1088,6 +1122,15 @@ type recordingWriter struct {
 	count  int
 	failAt int
 	err    error
+}
+
+type countingReader struct {
+	count int
+}
+
+func (reader *countingReader) ReadFile(string) ([]byte, error) {
+	reader.count++
+	return nil, errors.New("project read must not be called")
 }
 
 type failingReadFileSystem struct {

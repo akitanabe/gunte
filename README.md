@@ -318,13 +318,35 @@ patternはUTF-8の大小を区別します。pattern内の連続するspace、ta
 ## CLI
 
 ```text
-gunte emit|check [--target ID]
+gunte <command> [options]
 ```
+
+Gunteは現在の作業ディレクトリをproject rootとして実行します。`help`はproject rootの取得やproject fileの読み込みより前に完結するため、project外でも成功します。
 
 | command | 動作 |
 |---|---|
 | `emit` | 入力検証、生成、契約検査の後、artifactを出力先へ書き込む |
 | `check` | 同じ生成と契約検査を行い、既存artifactと比較する。書き込みは行わない |
+| `lock` | v2専用。全検証後に`gunte.lock.json`を更新する。target指定はない |
+| `help` | rootまたは指定commandのhelpを表示する |
+
+helpは次の入口で表示できます。
+
+```sh
+gunte --help
+gunte -h
+gunte help
+gunte help emit
+gunte help check
+gunte help lock
+gunte emit --help
+gunte check --help
+gunte lock --help
+```
+
+root helpは`gunte <command> [options]`のUsage、commandの概要、`-h, --help`、project root、終了コード、command helpへの導線を説明します。各command helpにはUsage、目的、主要input、書込/副作用、option、成功/失敗条件、例を含みます。`emit`は全検証後にwriteし、`check`はread-onlyでartifact、v2 managed inventory、v2 full lock mismatchを検査します。
+
+`--target ID`は`emit`と`check`だけが受け付けます。指定時もconfiguration、source、registryなどproject全体の検証は行われ、artifact生成または比較などtarget固有の処理だけがIDで限定されます。contract registry inputは、v2では`gunte.toml`の`[contracts].files`で選択された全fileです。
 
 | exit code | 意味 |
 |---|---|
@@ -335,6 +357,8 @@ gunte emit|check [--target ID]
 診断は標準エラー出力へ`kind: [path[:line:column]: ]message`形式で出力されます。関連するsource位置がある場合は、続けて`related`行を出力します。
 
 `--target ID`は生成、契約検査、比較、書き込みを指定targetに限定します。ただし、project設定とsourceの構造は常に全targetに対して検証されます。
+
+引数なし、unknown command、unknown/不正option、不完全な`--target`、余分なhelp引数はusageを標準エラー出力へ表示し、終了コード`2`を返します。従来のusage messageは`usage: gunte emit|check [--target ID] | gunte lock`です。
 
 ## 保証範囲と運用上の注意
 

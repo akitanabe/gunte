@@ -13,6 +13,18 @@ app境界はselected fileを宣言順に全て読み、その`path + bytes` Data
 
 selected fileのread failureはそのpathへ着地する。TOML syntax、schema、predicate validation、contract violationは該当fileのpredicateまたはfield位置へ着地する。全selected fileのread、parse、merge、validationを完了するまでartifact writerとatomic lock writerへ到達しない。
 
+## CLI
+
+CLIのroot Usageは`gunte <command> [options]`である。`emit`、`check`、`lock`、`help`をcommandとして持ち、rootでは`-h`と`--help`、各commandでは`--help`をhelp表示に使える。`gunte --help`、`gunte -h`、`gunte help`はroot helpを、`gunte help emit|check|lock`と`gunte emit|check|lock --help`はcommand helpを標準出力へ表示し、終了コード`0`を返す。helpはcwd取得、project execution、project file read、writer呼出しより前に完結するため、project外でも成功する。
+
+root helpはGunteの目的、`gunte <command> [options]`、各commandの一行説明、`-h, --help`、cwd=project root、終了コード`0/1/2`、command help導線を示す。command helpはUsage、目的、主要input、書込/副作用、option、成功/失敗条件、例を示す。`emit`は全input/source/generation/contract/registry検証後にwriteする。`check`はread-onlyでartifact bytes、v2 managed inventory、v2 full lock mismatchを検査する。`lock`はv2専用でtarget optionを持たず、全検証後に`gunte.lock.json`を更新する。`emit`と`check`のtarget optionは`--target ID`で、project全体を検証しtarget固有の処理だけをIDで限定する。contract registry inputはv2では`gunte.toml`の`[contracts].files`で選択された全fileである。
+
+unknown command、不正option、不完全なtarget、unknownまたは余分なhelp引数は標準エラー出力へ次の既存usage messageを表示し、終了コード`2`を返す。引数なしも同じである。
+
+```text
+usage: gunte emit|check [--target ID] | gunte lock
+```
+
 ## V2-01 version single source
 
 v2 [project] は version またはproject相対path version_from のexactly oneを必須とする。version fileはUTF-8で、先頭BOMを最大1個除去し、CRLF/bare CRをLFへ正規化する。その後、末尾LFが0個ならそのまま、1個なら1個だけ除去して、残りが非空かつLFを含まないことを要求する。末尾LFが2個以上、または本文途中LFは単一行違反である。前後空白はopaque valueの一部として保持する。version fileはsemantic input、source inventory期待file、collision、lockの対象である。
@@ -41,7 +53,7 @@ gunte.lock.jsonは2-space canonical JSON+LFで、key順はspec_version,semantic_
 
 canonical JSON stringはquoteとbackslashをescapeし、U+0008/U+0009/U+000A/U+000C/U+000Dを短縮escape、その他U+0000–U+001FとU+007Fをlowercase \u00xxでescapeする。<, >, &, U+2028, U+2029、その他非ASCIIはescapeしない。file末尾LFは1個である。preimage fixtureは<, >, &, 非ASCII、control、optional fieldを含む。
 
-CLIはgunte emit|check [--target ID]とv2専用gunte lock。lockはtarget optionを持たず、既存lockなしでbootstrapできる。全input/source/generation/contract/registry検証後に同一directory temp write・file sync・close・renameを行い、成功後bytesを再照合する。rename前の失敗ではtemp cleanupを試み旧lock bytesを保持する。rename結果不明ではold/new/otherを再観測しblind retryしない。emitはlockを更新しない。v2 checkはfull lock欠落/差を失敗する。lockは意味品質や変更承認を行わない。process crash durability、directory fsync、別processとの同時実行、全platformでのatomic replaceはv2保証外である。
+projectを実行するcommandはgunte emit|check [--target ID]とv2専用gunte lockである。lockはtarget optionを持たず、既存lockなしでbootstrapできる。全input/source/generation/contract/registry検証後に同一directory temp write・file sync・close・renameを行い、成功後bytesを再照合する。rename前の失敗ではtemp cleanupを試み旧lock bytesを保持する。rename結果不明ではold/new/otherを再観測しblind retryしない。emitはlockを更新しない。v2 checkはfull lock欠落/差を失敗する。lockは意味品質や変更承認を行わない。process crash durability、directory fsync、別processとの同時実行、全platformでのatomic replaceはv2保証外である。
 
 ## V2-05 target scope
 

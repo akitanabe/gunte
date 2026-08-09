@@ -12,6 +12,7 @@ import (
 	"sort"
 
 	"github.com/akitanabe/gunte/internal/adapter"
+	"github.com/akitanabe/gunte/internal/cli"
 	"github.com/akitanabe/gunte/internal/compile"
 	"github.com/akitanabe/gunte/internal/config"
 	"github.com/akitanabe/gunte/internal/contract"
@@ -100,12 +101,29 @@ func newRunnerWithWriters(root string, output writer, lockOutput lockWriter) Run
 	return Runner{root: root, reader: localReader{}, dirs: localReader{}, writer: output, lock: lockOutput}
 }
 
-// Run parses the minimal CLI grammar and executes emit or check.
+// Run keeps the argv-based API for compatibility with existing callers.
 func (runner Runner) Run(args []string) Result {
-	command, selected, diagnostic := parseArgs(args)
-	if diagnostic != nil {
-		return Result{ExitCode: ExitUsage, Diagnostics: []Diagnostic{*diagnostic}}
+	parsed := cli.Parse(args)
+	switch parsed.Kind {
+	case cli.ParseUsageError:
+		return Result{ExitCode: ExitUsage, Diagnostics: []Diagnostic{{Kind: "usage", Message: parsed.Message}}}
+	case cli.ParseHelp:
+		return Result{ExitCode: ExitSuccess}
+	case cli.ParseExecute:
+		return runner.Execute(parsed.Request)
+	default:
+		return Result{ExitCode: ExitUsage, Diagnostics: []Diagnostic{{Kind: "usage", Message: cli.UsageMessage}}}
 	}
+}
+
+// Execute runs a parsed request against the fixed project root. The request is
+// data produced by cli.Parse; argv is not re-parsed at this boundary.
+func (runner Runner) Execute(request cli.ExecuteRequest) Result {
+	if !request.Valid() {
+		return Result{ExitCode: ExitUsage, Diagnostics: []Diagnostic{{Kind: "usage", Message: cli.UsageMessage}}}
+	}
+	command := string(request.Command)
+	selected := request.Target
 	project, diagnostics := runner.loadProject()
 	if len(diagnostics) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: diagnostics}
@@ -190,29 +208,6 @@ func structureFailureResults(failures []structure.Failure) []Diagnostic {
 		result[i] = Diagnostic{Kind: "structure_violation", Path: failure.Contract.Path, Line: failure.Contract.Line, Column: failure.Contract.Column, ArtifactPath: failure.Path, Related: related, Message: failure.Message}
 	}
 	return result
-}
-
-func parseArgs(args []string) (string, string, *Diagnostic) {
-	const usageMessage = "usage: gunte emit|check [--target ID] | gunte lock"
-	usage := func(message string) (string, string, *Diagnostic) {
-		return "", "", &Diagnostic{Kind: "usage", Message: message}
-	}
-	if len(args) < 1 || (args[0] != "emit" && args[0] != "check" && args[0] != "lock") {
-		return usage(usageMessage)
-	}
-	if args[0] == "lock" {
-		if len(args) != 1 {
-			return usage(usageMessage)
-		}
-		return "lock", "", nil
-	}
-	if len(args) == 1 {
-		return args[0], "", nil
-	}
-	if len(args) != 3 || args[1] != "--target" || args[2] == "" {
-		return usage(usageMessage)
-	}
-	return args[0], args[2], nil
 }
 
 func (runner Runner) loadProject() (config.ProjectConfig, []Diagnostic) {

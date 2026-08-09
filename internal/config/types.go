@@ -201,8 +201,8 @@ type Contract struct {
 	Position   ContractPosition
 }
 
-// ContractPosition identifies the predicate table header in its source file.
-// Line and Column are one-origin and Column counts bytes from the line start.
+// ContractPosition identifies the predicate declaration or key position in its source file.
+// Line and Column are one-origin; Column counts bytes from the start of the line.
 type ContractPosition struct {
 	Path   string
 	Line   int

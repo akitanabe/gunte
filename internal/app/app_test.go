@@ -813,7 +813,7 @@ func TestExplicitContractFilesAreTheOnlyRegistryInputs(t *testing.T) {
 	}
 }
 
-func TestInvalidSelectedContractDoesNotReachArtifactOrLockWriters(t *testing.T) {
+func TestInvalidSelectedContractDoesNotWriteArtifactsOrLock(t *testing.T) {
 	root := writeVersionTwoProject(t)
 	if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte("[contracts.bad]\nkind = 1\n"), 0o644); err != nil {
 		t.Fatal(err)

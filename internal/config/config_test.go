@@ -1191,7 +1191,7 @@ op = "invalid"
 	}
 }
 
-func TestSuccessfulParsedPredicateIsNeverDroppedByPositionIndexCoverage(t *testing.T) {
+func TestInlineDottedPredicateRemainsInRegistry(t *testing.T) {
 	input := []byte(`contracts = { inline.kind = "forbids", inline.pattern = "x", inline.applies_to = ["one"] }
 `)
 	registry, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "inline-dotted.toml", Bytes: input}}, []string{"one"}, 2)
@@ -1244,7 +1244,7 @@ func TestTopLevelInlinePredicateLaterAssertionFieldUsesItsOwnExactPosition(t *te
 	}
 }
 
-func TestTopLevelInlineAssertionFieldsKeepTheirElementOffsets(t *testing.T) {
+func TestDiagnosticsPointToTheirOwnFields(t *testing.T) {
 	tests := []struct {
 		name, second, field, message string
 	}{
@@ -1302,7 +1302,7 @@ contracts.same.applies_to = ["one"]
 	}
 }
 
-func TestContractPositionIndexIgnoresCommentsAndMultilineStringDecoys(t *testing.T) {
+func TestCommentsAndMultilineStringsDoNotCreatePredicates(t *testing.T) {
 	input := []byte(`[contracts.real]
 kind = "forbids"
 pattern = """\

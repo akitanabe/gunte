@@ -146,7 +146,7 @@ func NormalizeVersionFile(path string, input []byte) (string, *Diagnostic) {
 
 func (v *validator) validateV2PredicateIDs(registry ContractRegistry) {
 	for _, predicate := range registry.Contracts {
-		if predicate.Slice == "" || (predicate.Kind != PredicateRequires && predicate.Kind != PredicateForbids) {
+		if predicate.Slice == "" || (predicate.Kind != PredicateRequires && predicate.Kind != PredicateForbids && predicate.Kind != PredicateOccurrences) {
 			continue
 		}
 		dash := strings.LastIndexByte(predicate.ID, '-')

@@ -49,6 +49,31 @@ func TestCanonicalBytesUseNormativeOrderEscapingAndValidatedContractData(t *test
 	}
 }
 
+func TestTextPreimageAddsScopedSelectorsAndOccurrenceCountWithoutChangingLegacyBytes(t *testing.T) {
+	legacy := config.Contract{ID: "ban", Kind: config.PredicateForbids, Pattern: "x", AppliesTo: []string{"one"}}
+	if got := string(ContractPreimage(legacy)); got != "{\"type\":\"text\",\"id\":\"ban\",\"kind\":\"forbids\",\"slice\":null,\"pattern\":\"x\",\"before\":null,\"after\":null,\"applies_to\":[\"one\"]}\n" {
+		t.Fatalf("legacy preimage = %q", got)
+	}
+	scoped := legacy
+	scoped.Paths = []string{"out/*.md"}
+	if got := string(ContractPreimage(scoped)); got != "{\"type\":\"text\",\"id\":\"ban\",\"kind\":\"forbids\",\"slice\":null,\"pattern\":\"x\",\"before\":null,\"after\":null,\"applies_to\":[\"one\"],\"paths\":[\"out/*.md\"],\"exclude_paths\":[]}\n" {
+		t.Fatalf("scoped preimage = %q", got)
+	}
+	count := int64(2)
+	occur := config.Contract{ID: "count", Kind: config.PredicateOccurrences, Pattern: "x", Paths: []string{"out/*.md"}, Count: &count, AppliesTo: []string{"one"}}
+	if got := string(ContractPreimage(occur)); got != "{\"type\":\"text\",\"id\":\"count\",\"kind\":\"occurrences\",\"slice\":null,\"pattern\":\"x\",\"before\":null,\"after\":null,\"applies_to\":[\"one\"],\"paths\":[\"out/*.md\"],\"exclude_paths\":[],\"count\":2}\n" {
+		t.Fatalf("occurrence preimage = %q", got)
+	}
+	sliced := occur
+	sliced.ID = "count-slice"
+	sliced.Slice = "span"
+	sliced.Paths = nil
+	sliced.ExcludePaths = nil
+	if got := string(ContractPreimage(sliced)); got != "{\"type\":\"text\",\"id\":\"count-slice\",\"kind\":\"occurrences\",\"slice\":\"span\",\"pattern\":\"x\",\"before\":null,\"after\":null,\"applies_to\":[\"one\"],\"paths\":[],\"exclude_paths\":[],\"count\":2}\n" {
+		t.Fatalf("sliced occurrence preimage = %q", got)
+	}
+}
+
 func TestSemanticInputPathsTrackSelectedContractFileOrder(t *testing.T) {
 	project := config.ProjectConfig{ContractFiles: []string{"rules/b.toml", "rules/a.toml"}, Project: config.Project{VersionFrom: "VERSION"}, Sources: config.Sources{Files: []string{"src/a.md"}}}
 	want := []string{"gunte.toml", "rules/b.toml", "rules/a.toml", "VERSION", "src/a.md"}

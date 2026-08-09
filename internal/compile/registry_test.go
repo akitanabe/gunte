@@ -32,3 +32,16 @@ func TestSpecVersionTwoRegistryReferencesAreCheckedAcrossAllTargets(t *testing.T
 		t.Fatalf("v1 diagnostics = %#v", diagnostics)
 	}
 }
+
+func TestSpecVersionTwoOccurrenceSliceUsesSpanRegistryIntegrity(t *testing.T) {
+	unit := parsedUnit(t, "src/a.md", []byte("<!-- @contract span -->\nbody\n<!-- @/contract -->\n"))
+	registry := config.ContractRegistry{Contracts: []config.Contract{{ID: "count", Kind: config.PredicateOccurrences, Slice: "span"}}}
+	if diagnostics := ValidateRegistryIntegrity(2, registry, []SourceUnit{unit}); len(diagnostics) != 0 {
+		t.Fatalf("occurrence span diagnostics = %#v", diagnostics)
+	}
+	registry.Contracts[0].Slice = "missing"
+	diagnostics := ValidateRegistryIntegrity(2, registry, []SourceUnit{unit})
+	if len(diagnostics) != 2 || !strings.Contains(diagnostics[0].Message, "slice reference must name a declared contract span missing") {
+		t.Fatalf("missing occurrence span diagnostics = %#v", diagnostics)
+	}
+}

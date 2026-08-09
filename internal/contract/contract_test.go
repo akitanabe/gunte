@@ -22,6 +22,7 @@ func TestMatchTokenBoundariesWhitespaceAndUnicode(t *testing.T) {
 		{"prefix rejected", "implementer-extra", "implementer", false},
 		{"ascii prefix adjacent rejected", "ximplementer", "implementer", false},
 		{"ascii suffix adjacent rejected", "implementerx", "implementer", false},
+		{"overlap does not relax Match boundaries", "aaa", "aa", false},
 		{"punctuation boundary", "(implementer)", "implementer", true},
 		{"unicode boundary", "実装implementer者", "implementer", true},
 		{"fold spaces", "a\t  implementer\nb", "a implementer b", true},
@@ -41,6 +42,106 @@ func TestMatchTokenBoundariesWhitespaceAndUnicode(t *testing.T) {
 		})
 	}
 }
+
+func TestCountMatchesIsLeftToRightNonOverlapping(t *testing.T) {
+	if got := CountMatches([]byte("aa aa"), "aa"); got != 2 {
+		t.Fatalf("CountMatches() = %d, want 2", got)
+	}
+	if got := CountMatches([]byte("aaa"), "aa"); got != 0 {
+		t.Fatalf("boundary CountMatches() = %d, want 0", got)
+	}
+	if got := CountMatches([]byte(":::"), "::"); got != 1 {
+		t.Fatalf("overlapping CountMatches() = %d, want 1", got)
+	}
+	if got := CountMatches([]byte("a\t  a"), "a a"); got != 1 {
+		t.Fatalf("whitespace CountMatches() = %d, want 1", got)
+	}
+	if got := CountMatches([]byte("senior-implementer implementer"), "implementer"); got != 1 {
+		t.Fatalf("boundary CountMatches() = %d, want 1", got)
+	}
+}
+
+func TestEvaluateOccurrenceCountsSlicesAndSelectedArtifacts(t *testing.T) {
+	position := config.ContractPosition{Path: "contracts.toml", Line: 1, Column: 1}
+	expected := int64(2)
+	spanBody := []byte("reviewer reviewer")
+	span := serialize.Artifact{TargetID: "one", Path: "out/a.md", Bytes: spanBody, Contracts: []serialize.Declaration{{ID: "span", Source: compile.SourcePosition{Path: "src/a.md", Line: 3, Column: 1}, Emitted: true, ArtifactRange: source.Range{Start: 0, End: len(spanBody)}}}}
+	slice := config.Contract{ID: "count-span", Kind: config.PredicateOccurrences, Slice: "span", Pattern: "reviewer", Count: &expected, AppliesTo: []string{"one"}, Position: position}
+	result, diagnostics := Evaluate(config.ContractRegistry{Contracts: []config.Contract{slice}}, []serialize.Artifact{span})
+	if len(diagnostics) != 0 || len(result.Violations) != 0 {
+		t.Fatalf("slice occurrence = %#v, %#v", result, diagnostics)
+	}
+	artifacts := []serialize.Artifact{
+		{TargetID: "one", Path: "out/b.md", Bytes: []byte("reviewer reviewer")},
+		{TargetID: "one", SourcePath: "src/a.md", Path: "out/a.md", Bytes: []byte("reviewer")},
+		{TargetID: "one", Path: "out/skip.md", Bytes: []byte("reviewer reviewer")},
+	}
+	artifactPredicate := config.Contract{ID: "count-artifact", Kind: config.PredicateOccurrences, Pattern: "reviewer", Paths: []string{"out/*.md"}, ExcludePaths: []string{"out/skip.md"}, Count: &expected, AppliesTo: []string{"one"}, Position: position}
+	result, diagnostics = Evaluate(config.ContractRegistry{Contracts: []config.Contract{artifactPredicate}}, artifacts)
+	if len(diagnostics) != 0 || len(result.Violations) != 1 || result.Violations[0].ArtifactPath != "out/a.md" || result.Violations[0].ActualCount == nil || *result.Violations[0].ActualCount != 1 || result.Violations[0].ExpectedCount == nil || *result.Violations[0].ExpectedCount != expected || len(result.Violations[0].RelatedSource) != 1 || result.Violations[0].RelatedSource[0].Path != "src/a.md" {
+		t.Fatalf("artifact occurrence = %#v, %#v", result, diagnostics)
+	}
+}
+
+func TestEvaluateScopedForbidsAndOccurrencesReportOwnerOnlyZeroSelection(t *testing.T) {
+	position := config.ContractPosition{Path: "contracts.toml", Line: 1, Column: 1}
+	for _, predicate := range []config.Contract{
+		{ID: "ban", Kind: config.PredicateForbids, Pattern: "x", Paths: []string{"missing/*.md"}, AppliesTo: []string{"one"}, Position: position},
+		{ID: "count", Kind: config.PredicateOccurrences, Pattern: "x", Paths: []string{"missing/*.md"}, Count: int64PointerForTest(1), AppliesTo: []string{"one"}, Position: position},
+	} {
+		result, diagnostics := Evaluate(config.ContractRegistry{Contracts: []config.Contract{predicate}}, []serialize.Artifact{{TargetID: "one", Path: "out/a.md", Bytes: []byte("x")}})
+		if len(result.Violations) != 0 || len(diagnostics) != 1 || diagnostics[0].Kind != InvalidPredicate || diagnostics[0].PredicateID != predicate.ID || diagnostics[0].TargetID != "" || diagnostics[0].ArtifactPath != "" {
+			t.Fatalf("zero selection = %#v, %#v", result, diagnostics)
+		}
+	}
+}
+
+func TestZeroSelectionOwnerDiagnosticIsReportedOncePerPredicate(t *testing.T) {
+	predicate := config.Contract{ID: "ban", Kind: config.PredicateForbids, Pattern: "x", Paths: []string{"missing/*.md"}, AppliesTo: []string{"one", "two"}}
+	result, diagnostics := Evaluate(config.ContractRegistry{Contracts: []config.Contract{predicate}}, []serialize.Artifact{{TargetID: "one", Path: "out/a.md", Bytes: []byte("x")}, {TargetID: "two", Path: "out/b.md", Bytes: []byte("x")}})
+	if len(result.Violations) != 0 || len(diagnostics) != 1 || diagnostics[0].PredicateID != predicate.ID {
+		t.Fatalf("owner-only diagnostics = %#v, %#v", result, diagnostics)
+	}
+}
+
+func TestOccurrenceSelectionPreservesArtifactOrderAndDeduplicatesPaths(t *testing.T) {
+	expected := int64(2)
+	predicate := config.Contract{ID: "count", Kind: config.PredicateOccurrences, Pattern: "x", Paths: []string{"out/*.md"}, ExcludePaths: []string{"out/c.md"}, Count: &expected, AppliesTo: []string{"one"}}
+	artifacts := []serialize.Artifact{
+		{TargetID: "one", Path: "out/b.md", Bytes: []byte("x x")},
+		{TargetID: "one", Path: "out/a.md", Bytes: []byte("x")},
+		{TargetID: "one", Path: "out/b.md", Bytes: []byte("x")},
+		{TargetID: "one", Path: "out/c.md", Bytes: []byte("x")},
+	}
+	result, diagnostics := Evaluate(config.ContractRegistry{Contracts: []config.Contract{predicate}}, artifacts)
+	if len(diagnostics) != 0 || len(result.Violations) != 1 || result.Violations[0].ArtifactPath != "out/a.md" {
+		t.Fatalf("selection = %#v, %#v", result, diagnostics)
+	}
+}
+
+func TestScopedSelectionDistinguishesPositiveMatchFromFinalSelection(t *testing.T) {
+	position := config.ContractPosition{Path: "contracts.toml", Line: 1, Column: 1}
+	artifacts := []serialize.Artifact{{TargetID: "one", Path: "out/a.md", Bytes: []byte("x")}}
+	for _, test := range []struct {
+		name      string
+		predicate config.Contract
+		wantDiag  bool
+	}{
+		{name: "positive selector has no match", predicate: config.Contract{ID: "ban", Kind: config.PredicateForbids, Pattern: "x", Paths: []string{"missing/*.md"}, AppliesTo: []string{"one"}, Position: position}, wantDiag: true},
+		{name: "positive match excluded", predicate: config.Contract{ID: "ban", Kind: config.PredicateForbids, Pattern: "x", Paths: []string{"out/*.md"}, ExcludePaths: []string{"out/*.md"}, AppliesTo: []string{"one"}, Position: position}, wantDiag: false},
+		{name: "all artifacts excluded without positive selector", predicate: config.Contract{ID: "ban", Kind: config.PredicateForbids, Pattern: "x", ExcludePaths: []string{"out/*.md"}, AppliesTo: []string{"one"}, Position: position}, wantDiag: false},
+		{name: "occurrence final selection empty", predicate: config.Contract{ID: "count", Kind: config.PredicateOccurrences, Pattern: "x", Paths: []string{"out/*.md"}, ExcludePaths: []string{"out/*.md"}, Count: int64PointerForTest(0), AppliesTo: []string{"one"}, Position: position}, wantDiag: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, diagnostics := Evaluate(config.ContractRegistry{Contracts: []config.Contract{test.predicate}}, artifacts)
+			if len(result.Violations) != 0 || (len(diagnostics) != 0) != test.wantDiag {
+				t.Fatalf("selection result = %#v, diagnostics = %#v", result, diagnostics)
+			}
+		})
+	}
+}
+
+func int64PointerForTest(value int64) *int64 { return &value }
 
 func TestEvaluateReportsEachViolationKindWithCompleteData(t *testing.T) {
 	position := config.ContractPosition{Path: "contracts.toml", Line: 4, Column: 1}

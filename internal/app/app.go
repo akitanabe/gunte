@@ -35,13 +35,15 @@ const (
 // path. ArtifactPath identifies the affected output artifact, Related preserves
 // source locations in order, and Line/Column use one-origin coordinates.
 type Diagnostic struct {
-	Kind         string
-	Path         string
-	Line         int
-	Column       int
-	ArtifactPath string
-	Related      []Location
-	Message      string
+	Kind          string
+	Path          string
+	Line          int
+	Column        int
+	ArtifactPath  string
+	Related       []Location
+	ActualCount   *int64
+	ExpectedCount *int64
+	Message       string
 }
 
 // Location identifies a project-relative source position with one-origin line
@@ -509,9 +511,20 @@ func contractDiagnosticResults(diagnostics []contract.Diagnostic) []Diagnostic {
 func violationResults(violations []contract.Violation) []Diagnostic {
 	result := make([]Diagnostic, len(violations))
 	for index, violation := range violations {
-		result[index] = Diagnostic{Kind: string(violation.Kind), Path: violation.Predicate.Path, Line: violation.Predicate.Line, Column: violation.Predicate.Column, ArtifactPath: violation.ArtifactPath, Related: locations(violation.RelatedSource), Message: fmt.Sprintf("predicate %s failed for target %s", violation.PredicateID, violation.TargetID)}
+		message := fmt.Sprintf("predicate %s failed for target %s", violation.PredicateID, violation.TargetID)
+		if violation.ActualCount != nil || violation.ExpectedCount != nil {
+			message = fmt.Sprintf("%s: expected count %s, actual count %s", message, countText(violation.ExpectedCount), countText(violation.ActualCount))
+		}
+		result[index] = Diagnostic{Kind: string(violation.Kind), Path: violation.Predicate.Path, Line: violation.Predicate.Line, Column: violation.Predicate.Column, ArtifactPath: violation.ArtifactPath, Related: locations(violation.RelatedSource), ActualCount: violation.ActualCount, ExpectedCount: violation.ExpectedCount, Message: message}
 	}
 	return result
+}
+
+func countText(value *int64) string {
+	if value == nil {
+		return "<none>"
+	}
+	return fmt.Sprintf("%d", *value)
 }
 
 func locations(positions []compile.SourcePosition) []Location {

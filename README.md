@@ -311,12 +311,13 @@ backtickまたはtildeを3文字以上使うfenced code block内では、directi
 
 ## 契約
 
-`requires`、`forbids`、`order`では`applies_to`が必須です。`slice`、`before`、`after`は、各targetで実際に出力されるspanまたはanchorへ解決できる必要があります。v2の`structure`では、artifactを検査するときだけ`applies_to`が必須で、`source_frontmatter`を検査するときは指定できません。assertionを含む詳細は[v2正本仕様](docs/gunte-spec.md#v2-03-typed-structural-contract)を参照してください。
+`requires`、`forbids`、`occurrences`、`order`では`applies_to`が必須です。`slice`、`before`、`after`は、各targetで実際に出力されるspanまたはanchorへ解決できる必要があります。v2の`structure`では、artifactを検査するときだけ`applies_to`が必須で、`source_frontmatter`を検査するときは指定できません。assertionを含む詳細は[v2正本仕様](docs/gunte-spec.md#v2-03-typed-structural-contract)を参照してください。
 
 | `kind` | 必須設定 | 成立条件 |
 |---|---|---|
 | `requires` | `slice`, `pattern`, `applies_to` | spanの出力bytesにpatternが1回以上一致する。空spanは不成立 |
 | `forbids` | `pattern`, `applies_to` | patternが一致しない。任意の`slice`を省略するとtargetの全artifactを検査する。空spanは不成立 |
+| `occurrences` | `pattern`, `count`, `paths`, `applies_to` | 選択した各artifact、または`slice`を指定したspanで、patternのnon-overlap一致数がcountと一致する。sliceなしではpathsは非空必須、sliceありではselector不可 |
 | `order` | `before`, `after`, `applies_to` | 2つのspan / anchorが同じartifactにあり、`before`の位置が`after`より前 |
 
 patternはUTF-8の大小を区別します。pattern内の連続するspace、tab、LFは、出力内の1文字以上のASCII空白列に一致します。pattern端がASCII識別子文字の場合は識別子境界も検査するため、たとえば`implementer`は`senior-implementer`内のsuffixには一致しません。

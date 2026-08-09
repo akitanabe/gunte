@@ -134,10 +134,11 @@ type ContractRegistry struct {
 type PredicateKind string
 
 const (
-	PredicateRequires  PredicateKind = "requires"
-	PredicateForbids   PredicateKind = "forbids"
-	PredicateOrder     PredicateKind = "order"
-	PredicateStructure PredicateKind = "structure"
+	PredicateRequires    PredicateKind = "requires"
+	PredicateForbids     PredicateKind = "forbids"
+	PredicateOccurrences PredicateKind = "occurrences"
+	PredicateOrder       PredicateKind = "order"
+	PredicateStructure   PredicateKind = "structure"
 )
 
 type StructureSubject string
@@ -187,18 +188,20 @@ type StructureAssertion struct {
 }
 
 type Contract struct {
-	ID         string
-	Kind       PredicateKind
-	Slice      string
-	Pattern    string
-	Before     string
-	After      string
-	AppliesTo  []string
-	Subject    StructureSubject
-	Paths      []string
-	Format     StructureFormat
-	Assertions []StructureAssertion
-	Position   ContractPosition
+	ID           string
+	Kind         PredicateKind
+	Slice        string
+	Pattern      string
+	Before       string
+	After        string
+	AppliesTo    []string
+	Subject      StructureSubject
+	Paths        []string
+	ExcludePaths []string
+	Count        *int64
+	Format       StructureFormat
+	Assertions   []StructureAssertion
+	Position     ContractPosition
 }
 
 // ContractPosition identifies the predicate declaration or key position in its source file.

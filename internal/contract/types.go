@@ -8,13 +8,14 @@ import (
 	"github.com/akitanabe/gunte/internal/serialize"
 )
 
-// ViolationKind identifies the three contract predicate failures.
+// ViolationKind identifies contract predicate failures.
 type ViolationKind string
 
 const (
-	RequiresViolation ViolationKind = "requires_violation"
-	ForbidsViolation  ViolationKind = "forbids_violation"
-	OrderViolation    ViolationKind = "order_violation"
+	RequiresViolation    ViolationKind = "requires_violation"
+	ForbidsViolation     ViolationKind = "forbids_violation"
+	OccurrencesViolation ViolationKind = "occurrences_violation"
+	OrderViolation       ViolationKind = "order_violation"
 )
 
 // DiagnosticKind identifies an invalid evaluator input or an unresolved
@@ -38,6 +39,8 @@ type Violation struct {
 	ArtifactPath  string
 	Predicate     config.ContractPosition
 	RelatedSource []compile.SourcePosition
+	ActualCount   *int64
+	ExpectedCount *int64
 }
 
 // Diagnostic records an evaluator input/reference problem without pretending

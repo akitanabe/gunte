@@ -14,6 +14,14 @@ import (
 	"github.com/akitanabe/gunte/internal/lexer"
 )
 
+const Path = "gunte.lock.json"
+
+// Reserves reports whether an artifact path would occupy the fixed lock path
+// or place an artifact below the path that must remain a file.
+func Reserves(path string) bool {
+	return path == Path || strings.HasPrefix(path, Path+"/")
+}
+
 // SemanticInputPaths returns the normative, duplicate-free input order.
 func SemanticInputPaths(project config.ProjectConfig) []string {
 	return config.SemanticInputPaths(project)

@@ -1011,6 +1011,223 @@ value = true
 	}
 }
 
+func TestRootTargetsEmitAndCheckBothArtifacts(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	project := `spec_version = 2
+[project]
+id = "p"
+version_from = "VERSION"
+[sources]
+files = ["src/a.md"]
+[targets.codex]
+output_root = "."
+[[targets.codex.rules]]
+match = "src/*.md"
+path = "AGENTS.md"
+profile = "markdown-v1"
+[targets.claude]
+output_root = "."
+[[targets.claude.rules]]
+match = "src/*.md"
+path = "CLAUDE.md"
+profile = "markdown-v1"
+`
+	if err := os.WriteFile(filepath.Join(root, "gunte.toml"), []byte(project), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	if result := runner.Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("lock = %#v", result)
+	}
+	if result := runner.Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	for _, path := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if err := os.WriteFile(filepath.Join(root, path), []byte("drift\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := runner.Run([]string{"check"})
+	if result.ExitCode != ExitFailure || !hasDiagnosticPath(result, "output_mismatch", "AGENTS.md") || !hasDiagnosticPath(result, "output_mismatch", "CLAUDE.md") {
+		t.Fatalf("check = %#v", result)
+	}
+}
+
+func TestSelectedEmitRunsGlobalPathPreflightWithoutSerializingUnselectedTarget(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = []byte(strings.Replace(string(project), `output_root = "out"`, `output_root = "."`, 1))
+	project = []byte(strings.Replace(string(project), `path = "a.md"`, `path = "AGENTS.md"`, 1))
+	project = append(project, []byte(`[targets.two]
+output_root = "other"
+[[targets.two.rules]]
+match = "src/*.md"
+path = "bad.json"
+profile = "json-v1"
+`)...)
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writer := &recordingWriter{}
+	result := newRunnerWithWriter(root, writer).Run([]string{"emit", "--target", "one"})
+	if result.ExitCode != ExitSuccess || writer.count != 1 {
+		t.Fatalf("selected result=%#v writes=%d", result, writer.count)
+	}
+
+	project = []byte(strings.Replace(string(project), `output_root = "other"`, `output_root = "."`, 1))
+	project = []byte(strings.Replace(string(project), `path = "bad.json"`, `path = "AGENTS.md"`, 1))
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writer = &recordingWriter{}
+	result = newRunnerWithWriter(root, writer).Run([]string{"emit", "--target", "one"})
+	if result.ExitCode != ExitFailure || !hasDiagnostic(result, "path_collision") || writer.count != 0 {
+		t.Fatalf("collision result=%#v writes=%d", result, writer.count)
+	}
+	writer = &recordingWriter{}
+	result = newRunnerWithWriter(root, writer).Run([]string{"emit"})
+	if result.ExitCode != ExitFailure || !hasDiagnostic(result, "path_collision") || writer.count != 0 {
+		t.Fatalf("unselected collision result=%#v writes=%d", result, writer.count)
+	}
+}
+
+func TestSelectedEmitRejectsDuplicateOutputsWithinUnselectedTarget(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	if err := os.WriteFile(filepath.Join(root, "src", "b.md"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project := `spec_version = 2
+[project]
+id = "p"
+version_from = "VERSION"
+[sources]
+files = ["src/a.md", "src/b.md"]
+[targets.a]
+output_root = "selected"
+[[targets.a.rules]]
+match = "src/a.md"
+path = "a.md"
+profile = "markdown-v1"
+[targets.b]
+output_root = "unselected"
+[[targets.b.rules]]
+match = "src/a.md"
+path = "same.md"
+profile = "markdown-v1"
+[[targets.b.rules]]
+match = "src/b.md"
+path = "same.md"
+profile = "markdown-v1"
+`
+	if err := os.WriteFile(filepath.Join(root, "gunte.toml"), []byte(project), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"emit", "--target", "a"}, {"emit"}} {
+		writer := &recordingWriter{}
+		result := newRunnerWithWriter(root, writer).Run(args)
+		if result.ExitCode != ExitFailure || !hasDiagnostic(result, "path_collision") || writer.count != 0 {
+			t.Fatalf("args=%v result=%#v writes=%d", args, result, writer.count)
+		}
+	}
+}
+
+func TestRootTargetWithoutManagedRootsDoesNotOwnRepositoryInventory(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = []byte(strings.Replace(string(project), `output_root = "out"`, `output_root = "."`, 1))
+	project = []byte(strings.Replace(string(project), `path = "a.md"`, `path = "AGENTS.md"`, 1))
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	if result := runner.Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("lock = %#v", result)
+	}
+	if result := runner.Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	if err := os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("unmanaged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run([]string{"check"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("check = %#v", result)
+	}
+}
+
+func TestRootTargetExplicitManagedSubrootUsesRepositoryRelativeInventoryPaths(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "generated"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "generated", "extra.md"), []byte("extra\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project := config.ProjectConfig{Targets: []config.Target{{ID: "one", OutputRoot: ".", ManagedRoots: []string{"generated"}}}}
+	diagnostics := NewRunner(root).checkInventory(project, nil, "")
+	if len(diagnostics) != 1 || diagnostics[0].Kind != "inventory_mismatch" || diagnostics[0].Path != "generated/extra.md" || strings.Contains(diagnostics[0].Path, "./") {
+		t.Fatalf("inventory diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestPathPreflightFailuresReachNeitherArtifactNorLockWriter(t *testing.T) {
+	for _, artifactPath := range []string{"gunte.toml", "gunte.lock.json", "gunte.lock.json/child"} {
+		t.Run(artifactPath, func(t *testing.T) {
+			root := writeVersionTwoProject(t)
+			projectPath := filepath.Join(root, "gunte.toml")
+			project, err := os.ReadFile(projectPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project = []byte(strings.Replace(string(project), `output_root = "out"`, `output_root = "."`, 1))
+			project = []byte(strings.Replace(string(project), `path = "a.md"`, `path = "`+artifactPath+`"`, 1))
+			if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			artifactWriter := &recordingWriter{}
+			lockWriter := &recordingWriter{}
+			runner := newRunnerWithWriters(root, artifactWriter, lockWriter)
+			result := runner.Run([]string{"emit"})
+			if result.ExitCode != ExitFailure || !hasDiagnostic(result, "path_collision") || artifactWriter.count != 0 || lockWriter.count != 0 {
+				t.Fatalf("emit result=%#v artifact writes=%d lock writes=%d", result, artifactWriter.count, lockWriter.count)
+			}
+			result = runner.Run([]string{"lock"})
+			if result.ExitCode != ExitFailure || !hasDiagnostic(result, "path_collision") || artifactWriter.count != 0 || lockWriter.count != 0 {
+				t.Fatalf("lock result=%#v artifact writes=%d lock writes=%d", result, artifactWriter.count, lockWriter.count)
+			}
+		})
+	}
+}
+
+func TestUnsafeConfiguredOutputPathsReachNoWriter(t *testing.T) {
+	for _, artifactPath := range []string{"/absolute", "../parent", "empty//segment"} {
+		t.Run(artifactPath, func(t *testing.T) {
+			root := writeVersionTwoProject(t)
+			projectPath := filepath.Join(root, "gunte.toml")
+			project, err := os.ReadFile(projectPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project = []byte(strings.Replace(string(project), `path = "a.md"`, `path = "`+artifactPath+`"`, 1))
+			if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writer := &recordingWriter{}
+			result := newRunnerWithWriter(root, writer).Run([]string{"emit"})
+			if result.ExitCode != ExitFailure || writer.count != 0 {
+				t.Fatalf("result=%#v writes=%d", result, writer.count)
+			}
+		})
+	}
+}
+
 func TestArtifactStructureUsesProfileProvenanceAndTypedYAMLFrontmatter(t *testing.T) {
 	root := writeVersionTwoProject(t)
 	projectPath := filepath.Join(root, "gunte.toml")

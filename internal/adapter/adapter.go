@@ -105,7 +105,7 @@ func Preflight(project config.ProjectConfig, sources []Source) (PathPlan, []Diag
 	}
 
 	sort.Strings(plan.UnmatchedSources)
-	seenTargets := make(map[string]int)
+	seenOutputPaths := make(map[string]int)
 	semanticInputs := semanticInputPaths(project)
 	for targetIndex, target := range project.Targets {
 		for sourceIndex, decision := range decisions {
@@ -140,7 +140,7 @@ func Preflight(project config.ProjectConfig, sources []Source) (PathPlan, []Diag
 				continue
 			}
 			fullPath := outputpath.Join(target.OutputRoot, artifactPath)
-			_, duplicate := seenTargets[fullPath]
+			_, duplicate := seenOutputPaths[fullPath]
 			if duplicate || semanticInputs[fullPath] || lockfile.Reserves(fullPath) {
 				diagnostics = append(diagnostics, Diagnostic{
 					Code:     "path_collision",
@@ -153,7 +153,7 @@ func Preflight(project config.ProjectConfig, sources []Source) (PathPlan, []Diag
 				continue
 			}
 			if !duplicate {
-				seenTargets[fullPath] = targetIndex
+				seenOutputPaths[fullPath] = targetIndex
 			}
 			plan.Artifacts = append(plan.Artifacts, PlannedArtifact{TargetIndex: targetIndex, SourceIndex: sourceIndex, RuleIndex: ruleIndex, Path: fullPath})
 		}

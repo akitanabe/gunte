@@ -1162,7 +1162,7 @@ func TestEmitAndCheckRejectArtifactSymlinkWithoutFollowing(t *testing.T) {
 	}
 }
 
-func TestSelectedEmitRunsGlobalPathPreflightWithoutSerializingUnselectedTarget(t *testing.T) {
+func TestSelectedEmitIgnoresUnselectedInvalidProfileButRejectsGlobalCollisionBeforeWriting(t *testing.T) {
 	root := writeVersionTwoProject(t)
 	projectPath := filepath.Join(root, "gunte.toml")
 	project, err := os.ReadFile(projectPath)

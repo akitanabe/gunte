@@ -1191,6 +1191,48 @@ op = "invalid"
 	}
 }
 
+func TestSuccessfulParsedPredicateIsNeverDroppedByPositionIndexCoverage(t *testing.T) {
+	input := []byte(`contracts = { inline.kind = "forbids", inline.pattern = "x", inline.applies_to = ["one"] }
+`)
+	registry, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "inline-dotted.toml", Bytes: input}}, []string{"one"}, 2)
+	if len(diagnostics) != 0 || len(registry.Contracts) != 1 || registry.Contracts[0].ID != "inline" {
+		t.Fatalf("registry = %#v, diagnostics = %#v", registry, diagnostics)
+	}
+	if registry.Contracts[0].Position.Line != 1 || registry.Contracts[0].Position.Column != strings.Index(string(input), "inline.kind")+1 {
+		t.Fatalf("position = %#v", registry.Contracts[0].Position)
+	}
+}
+
+func TestInlineDottedFieldDiagnosticUsesItsPredicateKeyPosition(t *testing.T) {
+	input := []byte(`contracts = { first.kind = "forbids", first.pattern = "x", first.applies_to = ["one"], second.kind = "forbids", second.pattern = " invalid ", second.applies_to = ["one"] }
+`)
+	registry, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "inline-dotted.toml", Bytes: input}}, []string{"one"}, 2)
+	if len(registry.Contracts) != 2 {
+		t.Fatalf("registry = %#v, diagnostics = %#v", registry, diagnostics)
+	}
+	diagnostic := findDiagnostic(t, diagnostics, "pattern must not have leading or trailing whitespace")
+	if diagnostic.Path != "inline-dotted.toml" || diagnostic.Line != 1 || diagnostic.Column != strings.Index(string(input), "second.pattern")+len("second.")+1 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestLaterInlineArrayAssertionFieldUsesItsOwnExactPosition(t *testing.T) {
+	input := []byte(`[contracts.only]
+kind = "structure"
+subject = "source_frontmatter"
+paths = ["src/a.md"]
+assertions = [
+  { path = "name", op = "exists" },
+  { path = "name", op = "invalid" },
+]
+`)
+	_, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "assertions.toml", Bytes: input}}, []string{"one"}, 2)
+	diagnostic := findDiagnostic(t, diagnostics, "unknown assertion op")
+	if diagnostic.Path != "assertions.toml" || diagnostic.Line != 7 || diagnostic.Column != 20 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+}
+
 func TestCrossFileDuplicatesAlwaysRelateToGlobalFirstInlinePredicate(t *testing.T) {
 	documents := []ContractDocument{
 		{Path: "a.toml", Bytes: []byte(`contracts = { same = { kind = "forbids", pattern = "a", applies_to = ["one"] } }`)},

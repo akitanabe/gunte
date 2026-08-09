@@ -14,10 +14,12 @@ type predicateOccurrence struct {
 }
 
 type inlineAssignment struct {
-	key        string
-	keyOffset  int
-	valueStart int
-	valueEnd   int
+	key         string
+	keyParts    []string
+	partOffsets []int
+	keyOffset   int
+	valueStart  int
+	valueEnd    int
 }
 
 type inlinePredicatePosition struct {
@@ -82,7 +84,18 @@ func topLevelInlinePredicates(line string, valueStart int) []inlinePredicatePosi
 	}
 	assignments := inlineAssignments(line[valueStart:])
 	result := make([]inlinePredicatePosition, 0, len(assignments))
+	dotted := map[string]int{}
 	for _, assignment := range assignments {
+		if len(assignment.keyParts) >= 2 {
+			index, exists := dotted[assignment.keyParts[0]]
+			if !exists {
+				index = len(result)
+				dotted[assignment.keyParts[0]] = index
+				result = append(result, inlinePredicatePosition{id: assignment.keyParts[0], offset: valueStart + assignment.keyOffset + assignment.partOffsets[0], fields: map[string]int{}})
+			}
+			result[index].fields[assignment.keyParts[1]] = valueStart + assignment.keyOffset + assignment.partOffsets[1]
+			continue
+		}
 		fields := map[string]int{}
 		for _, field := range inlineAssignments(line[valueStart+assignment.valueStart : valueStart+assignment.valueEnd]) {
 			fields[field.key] = valueStart + assignment.valueStart + field.keyOffset
@@ -113,17 +126,57 @@ func inlineAssignments(value string) []inlineAssignment {
 		keyText := strings.TrimSpace(value[keyStart:equal])
 		segments := tomlKeySegments(keyText)
 		if len(segments) != 1 {
-			break
+			if len(segments) == 0 {
+				break
+			}
 		}
 		keyOffset := keyStart + strings.Index(value[keyStart:equal], strings.TrimSpace(keyText))
+		partOffsets := tomlKeySegmentOffsets(keyText)
 		valueStart := equal + 1
 		for valueStart < len(value) && (value[valueStart] == ' ' || value[valueStart] == '\t') {
 			valueStart++
 		}
 		valueEnd := inlineValueEnd(value, valueStart)
-		result = append(result, inlineAssignment{key: segments[0], keyOffset: keyOffset, valueStart: valueStart, valueEnd: valueEnd})
+		result = append(result, inlineAssignment{key: segments[0], keyParts: segments, partOffsets: partOffsets, keyOffset: keyOffset, valueStart: valueStart, valueEnd: valueEnd})
 		cursor = valueEnd
 	}
+	return result
+}
+
+func tomlKeySegmentOffsets(key string) []int {
+	var result []int
+	segmentStart := 0
+	quote := byte(0)
+	escaped := false
+	appendOffset := func(end int) {
+		for segmentStart < end && (key[segmentStart] == ' ' || key[segmentStart] == '\t') {
+			segmentStart++
+		}
+		result = append(result, segmentStart)
+	}
+	for index := 0; index < len(key); index++ {
+		character := key[index]
+		if quote != 0 {
+			if quote == '"' && character == '\\' && !escaped {
+				escaped = true
+				continue
+			}
+			if character == quote && !escaped {
+				quote = 0
+			}
+			escaped = false
+			continue
+		}
+		if character == '"' || character == '\'' {
+			quote = character
+			continue
+		}
+		if character == '.' {
+			appendOffset(index)
+			segmentStart = index + 1
+		}
+	}
+	appendOffset(len(key))
 	return result
 }
 
@@ -205,6 +258,13 @@ func locateContractField(input []byte, keyPath string) (int, int, bool) {
 		return 0, 0, false
 	}
 	id, field := segments[1], segments[2]
+	if len(segments) == 4 {
+		if array, index, ok := indexedKeySegment(segments[2]); ok {
+			if offset, found := locateInlineArrayElementField(input, id, array, index, segments[3]); found {
+				return offsetLineColumn(input, offset)
+			}
+		}
+	}
 	var tablePath []string
 	arrayIndexes := map[string]int{}
 	inMultiline := ""
@@ -260,6 +320,133 @@ func locateContractField(input []byte, keyPath string) (int, int, bool) {
 		}
 	}
 	return 0, 0, false
+}
+
+func indexedKeySegment(segment string) (string, int, bool) {
+	open := strings.LastIndexByte(segment, '[')
+	if open <= 0 || !strings.HasSuffix(segment, "]") {
+		return "", 0, false
+	}
+	index, err := strconv.Atoi(segment[open+1 : len(segment)-1])
+	return segment[:open], index, err == nil
+}
+
+func locateInlineArrayElementField(input []byte, id, array string, wantedIndex int, field string) (int, bool) {
+	text := string(input)
+	var tablePath []string
+	lineOffset := 0
+	inMultiline := ""
+	for _, raw := range strings.Split(text, "\n") {
+		line, nextMultiline := tomlCode(raw, inMultiline)
+		inMultiline = nextMultiline
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && !strings.HasPrefix(trimmed, "[[") {
+			if close := strings.IndexByte(trimmed, ']'); close > 0 {
+				tablePath = tomlKeySegments(trimmed[1:close])
+			}
+		} else if len(tablePath) == 2 && tablePath[0] == "contracts" && tablePath[1] == id {
+			if equal := strings.IndexByte(trimmed, '='); equal >= 0 {
+				key := strings.TrimSpace(trimmed[:equal])
+				if parts := tomlKeySegments(key); len(parts) == 1 && parts[0] == array {
+					rawEqual := strings.IndexByte(raw, '=')
+					valueStart := lineOffset + rawEqual + 1
+					elements := inlineArrayTableFields(text[valueStart:])
+					if wantedIndex < len(elements) {
+						if relative, exists := elements[wantedIndex][field]; exists {
+							return valueStart + relative, true
+						}
+					}
+				}
+			}
+		}
+		lineOffset += len(raw) + 1
+	}
+	return 0, false
+}
+
+func inlineArrayTableFields(value string) []map[string]int {
+	open := strings.IndexByte(value, '[')
+	if open < 0 {
+		return nil
+	}
+	var result []map[string]int
+	for cursor := open + 1; cursor < len(value); cursor++ {
+		if value[cursor] == '#' {
+			if newline := strings.IndexByte(value[cursor:], '\n'); newline >= 0 {
+				cursor += newline
+				continue
+			}
+			break
+		}
+		if value[cursor] == ']' {
+			break
+		}
+		if value[cursor] != '{' {
+			continue
+		}
+		end := matchingInlineTableEnd(value, cursor)
+		if end < 0 {
+			return result
+		}
+		fields := map[string]int{}
+		for _, assignment := range inlineAssignments(value[cursor : end+1]) {
+			fields[assignment.key] = cursor + assignment.keyOffset
+		}
+		result = append(result, fields)
+		cursor = end
+	}
+	return result
+}
+
+func matchingInlineTableEnd(value string, start int) int {
+	depth := 0
+	quote := byte(0)
+	escaped := false
+	for index := start; index < len(value); index++ {
+		character := value[index]
+		if quote != 0 {
+			if quote == '"' && character == '\\' && !escaped {
+				escaped = true
+				continue
+			}
+			if character == quote && !escaped {
+				quote = 0
+			}
+			escaped = false
+			continue
+		}
+		if character == '"' || character == '\'' {
+			quote = character
+			continue
+		}
+		if character == '#' {
+			if newline := strings.IndexByte(value[index:], '\n'); newline >= 0 {
+				index += newline
+				continue
+			}
+			return -1
+		}
+		if character == '{' {
+			depth++
+		}
+		if character == '}' {
+			depth--
+			if depth == 0 {
+				return index
+			}
+		}
+	}
+	return -1
+}
+
+func offsetLineColumn(input []byte, offset int) (int, int, bool) {
+	if offset < 0 || offset > len(input) {
+		return 0, 0, false
+	}
+	prefix := string(input[:offset])
+	line := strings.Count(prefix, "\n") + 1
+	lastNewline := strings.LastIndexByte(prefix, '\n')
+	return line, offset - lastNewline, true
 }
 
 func sameKeyPath(first, second []string) bool {

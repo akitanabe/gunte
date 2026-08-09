@@ -47,48 +47,71 @@ func ParseContractsForSpec(path string, input []byte, knownTargets []string, spe
 // ParseContractDocuments validates selected documents and folds their registries in normative order.
 func ParseContractDocuments(documents []ContractDocument, knownTargets []string, specVersion int) (ContractRegistry, []Diagnostic) {
 	registry := ContractRegistry{}
-	first := map[string]ContractPosition{}
-	concrete := map[string]bool{}
+	seen := map[string]ContractPosition{}
 	var diagnostics []Diagnostic
 	for _, document := range documents {
-		duplicateInDocument := false
-		implicitHere := map[string]bool{}
-		explicitHere := map[string]bool{}
-		for _, occurrence := range predicateOccurrences(document.Path, document.Bytes) {
-			original, exists := first[occurrence.id]
-			if !exists {
-				first[occurrence.id] = occurrence.position
-			}
-			becomesConcrete := occurrence.concrete || (occurrence.implicit && occurrence.field == "kind")
-			firstExplicitization := occurrence.concrete && implicitHere[occurrence.id] && !explicitHere[occurrence.id]
-			_, alreadyConcrete := concrete[occurrence.id]
-			if becomesConcrete && alreadyConcrete && !firstExplicitization {
-				diagnostics = append(diagnostics, Diagnostic{Path: occurrence.position.Path, Line: occurrence.position.Line, Column: occurrence.position.Column, Related: []ContractPosition{original}, Message: "duplicate predicate " + occurrence.id})
-				duplicateInDocument = true
-				continue
-			}
-			if occurrence.implicit && occurrence.field == "kind" && !alreadyConcrete {
-				implicitHere[occurrence.id] = true
-			}
-			if occurrence.concrete {
-				explicitHere[occurrence.id] = true
-			}
-			if becomesConcrete {
-				concrete[occurrence.id] = true
-			}
-		}
 		parsed, current := ParseContractsForSpec(document.Path, document.Bytes, knownTargets, specVersion)
-		if !duplicateInDocument || !onlyDuplicateParseFailure(current) {
-			diagnostics = append(diagnostics, current...)
-		}
-		for _, predicate := range parsed.Contracts {
-			if original := first[predicate.ID]; original.Path != predicate.Position.Path || original.Line != predicate.Position.Line || original.Column != predicate.Position.Column {
+		if onlyDuplicateParseFailure(current) {
+			candidateSeen := clonePositions(seen)
+			duplicates := duplicateDiagnosticsFromOccurrences(document, candidateSeen)
+			if len(duplicates) != 0 {
+				seen = candidateSeen
+				diagnostics = append(diagnostics, duplicates...)
 				continue
 			}
+		}
+		diagnostics = append(diagnostics, current...)
+		for _, predicate := range parsed.Contracts {
+			if original, exists := seen[predicate.ID]; exists {
+				diagnostics = append(diagnostics, Diagnostic{Path: predicate.Position.Path, Line: predicate.Position.Line, Column: predicate.Position.Column, Related: []ContractPosition{original}, Message: "duplicate predicate " + predicate.ID})
+				continue
+			}
+			seen[predicate.ID] = predicate.Position
 			registry.Contracts = append(registry.Contracts, predicate)
 		}
 	}
 	return registry, diagnostics
+}
+
+func clonePositions(input map[string]ContractPosition) map[string]ContractPosition {
+	result := make(map[string]ContractPosition, len(input))
+	for id, position := range input {
+		result[id] = position
+	}
+	return result
+}
+
+func duplicateDiagnosticsFromOccurrences(document ContractDocument, seen map[string]ContractPosition) []Diagnostic {
+	concrete := map[string]bool{}
+	for id := range seen {
+		concrete[id] = true
+	}
+	implicitHere := map[string]bool{}
+	explicitHere := map[string]bool{}
+	var diagnostics []Diagnostic
+	for _, occurrence := range predicateOccurrences(document.Path, document.Bytes) {
+		original, exists := seen[occurrence.id]
+		if !exists {
+			seen[occurrence.id] = occurrence.position
+			original = occurrence.position
+		}
+		becomesConcrete := occurrence.concrete || (occurrence.implicit && occurrence.field == "kind")
+		firstExplicitization := occurrence.concrete && implicitHere[occurrence.id] && !explicitHere[occurrence.id]
+		if becomesConcrete && concrete[occurrence.id] && !firstExplicitization {
+			diagnostics = append(diagnostics, Diagnostic{Path: occurrence.position.Path, Line: occurrence.position.Line, Column: occurrence.position.Column, Related: []ContractPosition{original}, Message: "duplicate predicate " + occurrence.id})
+			continue
+		}
+		if occurrence.implicit && occurrence.field == "kind" && !concrete[occurrence.id] {
+			implicitHere[occurrence.id] = true
+		}
+		if occurrence.concrete {
+			explicitHere[occurrence.id] = true
+		}
+		if becomesConcrete {
+			concrete[occurrence.id] = true
+		}
+	}
+	return diagnostics
 }
 
 func onlyDuplicateParseFailure(diagnostics []Diagnostic) bool {

@@ -31,7 +31,9 @@ v2 [project] は version またはproject相対path version_from のexactly one�
 
 ## V2-02 managed inventory
 
-v2 [sources] と各 [targets.<id>] は managed_roots, allow_files, allow_dirs を持てる。source値はproject相対、target値はoutput_root相対である。未指定は空で所有しない。展開後managed rootsはsource/全target間で同一・ancestor/descendant overlapを禁止する。allow entryはexactly one root配下で、allow同士の冗長overlapを禁止する。
+v2 [sources] と各 [targets.<id>] は managed_roots, allow_files, allow_dirs を持てる。source値はproject相対、target値はoutput_root相対である。v2のtargetだけはoutput_root = "."をrepository root sentinelとして使用でき、artifactとmanaged scopeの展開結果に`./`を付けない。他のpath field、managed_roots、v1 output_rootで`.`はinvalidである。未指定managed_rootsはroot targetでも空でrepository rootを所有しない。展開後managed rootsはsource/全target間で同一・ancestor/descendant overlapを禁止する。allow entryはexactly one root配下で、allow同士の冗長overlapを禁止する。
+
+emit/check/lockはsource投影後かつtarget固有metadata/profile serialization前に、全sourceと全targetのrule match、path template展開、展開path validationを一度だけ計算する。target選択はこのpreflightを限定しない。別target間のexact duplicate output、semantic inputとのexact collision、固定path `gunte.lock.json`とのexact/descendant collisionは全writer到達前にfailureとする。選択されないtargetのmetadata解決とprofile serializationは実行しない。
 
 checkはmanaged rootだけをread-only再帰走査する。source期待fileはselected contract files、version_from、sources.files、target期待fileは今回算出artifactである。期待/allow/rootのancestor directory、allow_file exact entry、allow_dirと全descendantは正当で、それ以外のfile/directoryをinventory mismatchとする。存在しないallowは許容する。symlink directoryは追跡せずleafとして扱い、期待file/allow_fileだけに一致できる。managed scope外をstaleにしない。全target ruleに不一致のsourceもcheck failure。通常emitはstaleを削除せず、clean commandはv2にない。
 

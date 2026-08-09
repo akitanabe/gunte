@@ -178,14 +178,14 @@ func TestAdaptReportsUnmatchedWarningAndCollisionsDeterministically(t *testing.T
 	}
 }
 
-func TestAdaptDoesNotReservePathWhenMetadataMappingFails(t *testing.T) {
+func TestAdaptRejectsDuplicatePathBeforeMetadataMapping(t *testing.T) {
 	project := config.ProjectConfig{Targets: []config.Target{{ID: "target", OutputRoot: "out", Rules: []config.Rule{{Match: "first.md", Path: "same.md", Profile: config.ProfileYAML, Metadata: []config.MetadataEntry{{Field: "required", From: "frontmatter:missing", Type: config.MetadataString, Required: true}}}, {Match: "second.md", Path: "same.md", Profile: config.ProfileYAML}}}}}
 	result, diagnostics := Adapt(project, []Source{{Projection: compile.SourceProjection{Path: "first.md", Bytes: []byte("first")}}, {Projection: compile.SourceProjection{Path: "second.md", Bytes: []byte("second")}}})
-	if len(diagnostics) != 1 || diagnostics[0].Code != "metadata_missing" {
-		t.Fatalf("diagnostics = %#v, want only first metadata error", diagnostics)
+	if len(diagnostics) != 2 || !hasCode(diagnostics, "path_collision") || !hasCode(diagnostics, "metadata_missing") {
+		t.Fatalf("diagnostics = %#v", diagnostics)
 	}
-	if len(result.Artifacts) != 1 || result.Artifacts[0].SourcePath != "second.md" || !bytes.Equal(result.Artifacts[0].Body, []byte("second")) {
-		t.Fatalf("result = %#v, want valid second artifact", result)
+	if len(result.Artifacts) != 0 {
+		t.Fatalf("result = %#v, want no artifact", result)
 	}
 }
 
@@ -350,6 +350,54 @@ func TestAdaptDetectsEachSelectedContractFileCollision(t *testing.T) {
 		if !hasCode(diagnostics, "path_collision") {
 			t.Fatalf("%s diagnostics = %#v", contractPath, diagnostics)
 		}
+	}
+}
+
+func TestPreflightNormalizesRootOutputsAndRejectsGlobalReservedPaths(t *testing.T) {
+	sources := []Source{{Projection: compile.SourceProjection{Path: "source.md"}}}
+	project := config.ProjectConfig{
+		Sources: config.Sources{Files: []string{"source.md"}},
+		Targets: []config.Target{
+			{ID: "codex", OutputRoot: ".", Rules: []config.Rule{{Match: "source.md", Path: "AGENTS.md", Profile: config.ProfileMarkdown}}},
+			{ID: "claude", OutputRoot: ".", Rules: []config.Rule{{Match: "source.md", Path: "CLAUDE.md", Profile: config.ProfileMarkdown}}},
+		},
+	}
+	plan, diagnostics := Preflight(project, sources)
+	if len(diagnostics) != 0 || len(plan.Artifacts) != 2 || plan.Artifacts[0].Path != "AGENTS.md" || plan.Artifacts[1].Path != "CLAUDE.md" {
+		t.Fatalf("plan=%#v diagnostics=%#v", plan, diagnostics)
+	}
+
+	for _, artifactPath := range []string{"gunte.toml", "gunte.lock.json", "gunte.lock.json/child"} {
+		project.Targets[0].Rules[0].Path = artifactPath
+		_, diagnostics = Preflight(project, sources)
+		if !hasCode(diagnostics, "path_collision") {
+			t.Fatalf("path %q diagnostics = %#v", artifactPath, diagnostics)
+		}
+	}
+}
+
+func TestPreflightRejectsDuplicateOutputsAcrossTargets(t *testing.T) {
+	project := config.ProjectConfig{Targets: []config.Target{
+		{ID: "one", OutputRoot: ".", Rules: []config.Rule{{Match: "source.md", Path: "AGENTS.md", Profile: config.ProfileMarkdown}}},
+		{ID: "two", OutputRoot: ".", Rules: []config.Rule{{Match: "source.md", Path: "AGENTS.md", Profile: config.ProfileMarkdown}}},
+	}}
+	_, diagnostics := Preflight(project, []Source{{Projection: compile.SourceProjection{Path: "source.md"}}})
+	if !hasCode(diagnostics, "path_collision") {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestPreflightRejectsDuplicateOutputsWithinTarget(t *testing.T) {
+	project := config.ProjectConfig{Targets: []config.Target{{ID: "one", OutputRoot: "out", Rules: []config.Rule{
+		{Match: "one.md", Path: "same.md", Profile: config.ProfileMarkdown},
+		{Match: "two.md", Path: "same.md", Profile: config.ProfileMarkdown},
+	}}}}
+	_, diagnostics := Preflight(project, []Source{
+		{Projection: compile.SourceProjection{Path: "one.md"}},
+		{Projection: compile.SourceProjection{Path: "two.md"}},
+	})
+	if !hasCode(diagnostics, "path_collision") {
+		t.Fatalf("diagnostics = %#v", diagnostics)
 	}
 }
 

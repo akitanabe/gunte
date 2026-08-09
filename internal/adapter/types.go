@@ -49,6 +49,22 @@ type Result struct {
 	Artifacts []Artifact
 }
 
+// PathPlan is the validated rule and output-path decision for every target.
+// It deliberately excludes metadata and serialized profile data so selection
+// can happen after global path validation without evaluating unselected output.
+type PathPlan struct {
+	Artifacts        []PlannedArtifact
+	UnmatchedSources []string
+}
+
+// PlannedArtifact identifies one selected rule and its normalized output path.
+type PlannedArtifact struct {
+	TargetIndex int
+	SourceIndex int
+	RuleIndex   int
+	Path        string
+}
+
 // Severity distinguishes mapping errors from the optional unmatched source
 // warning.
 type Severity string

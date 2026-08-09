@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
+	"github.com/akitanabe/gunte/internal/outputpath"
 )
 
 func (v *validator) project(root map[string]any, order []toml.Key) ProjectConfig {
@@ -196,7 +197,9 @@ func (v *validator) targets(raw any, order []toml.Key, specVersion int) ([]Targe
 		}
 		v.unknownKeys(prefix, entry, allowed...)
 		target := Target{ID: id, OutputRoot: requiredString(v, entry, prefix+".output_root", "output_root"), Rules: []Rule{}}
-		validatePath(v, prefix+".output_root", target.OutputRoot)
+		if specVersion != 2 || target.OutputRoot != "." {
+			validatePath(v, prefix+".output_root", target.OutputRoot)
+		}
 		if specVersion == 2 {
 			target.ManagedRoots = v.pathList(entry, prefix+".managed_roots")
 			target.AllowFiles = v.pathList(entry, prefix+".allow_files")
@@ -346,13 +349,7 @@ func prefixPaths(prefix string, paths []string) []string {
 }
 
 func joinRelativePath(prefix, value string) string {
-	if prefix == "" {
-		return value
-	}
-	if value == "" {
-		return prefix
-	}
-	return prefix + "/" + value
+	return outputpath.Join(prefix, value)
 }
 
 func pathContains(root, value string) bool {

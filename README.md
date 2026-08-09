@@ -220,12 +220,12 @@ gunte check --target codex
 | `[sources].managed_roots` | v2専用。`check`がsource inventoryを検査するproject相対root |
 | `[sources].allow_files`, `[sources].allow_dirs` | v2専用。managed root内で生成入力以外に許可するpath |
 | `[terms.<name>].<target>` | 任意の用語定義。宣言した場合は全targetの非空・単一行の値が必要 |
-| `[targets.<id>].output_root` | 必須。targetの出力root |
+| `[targets.<id>].output_root` | 必須。targetの出力root。v2だけは`.`でrepository rootを指定可能 |
 | `[targets.<id>].managed_roots` | v2専用。`check`がoutput inventoryを検査する`output_root`相対root |
 | `[targets.<id>].allow_files`, `[targets.<id>].allow_dirs` | v2専用。managed root内で生成物以外に許可するpath |
 | `[[targets.<id>.rules]]` | sourceからartifactへの変換rule |
 
-pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`、backslash、NULは使用できません。`sources.files`にないファイルはsourceとして処理されません。v2の`check`は、managed root内にある未宣言・未許可のpathをinventory mismatchとして検出します。
+pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`、backslash、NULは使用できません。例外としてv2の`output_root = "."`だけはrepository rootを表します。root targetでも`managed_roots`の省略はrepository rootを所有せず、明示したsubrootだけをinventory検査します。`sources.files`にないファイルはsourceとして処理されません。v2の`check`は、managed root内にある未宣言・未許可のpathをinventory mismatchとして検出します。
 
 ### rule matchingと出力path
 
@@ -233,7 +233,7 @@ pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`
 - wildcardは`*`だけです。`/`を跨がず、`**`に特別な意味はありません。
 - `path`では、`match`内の各`*`を宣言順に`{1}`〜`{9}`で参照します。
 - 同じsourceが同一target内の複数ruleに一致するとエラーです。
-- `output_root + "/" + path`が別artifactまたはsemantic inputと一致するとエラーです。
+- root sentinelでは`path`、それ以外では`output_root + "/" + path`を出力pathとします。全targetの出力pathはtarget選択前に検証され、別targetのartifact、semantic input、`gunte.lock.json`またはそのdescendantと一致するとエラーです。
 - v2のsemantic inputは`gunte.toml`、選択した全contract file、`version_from`、`sources.files`の順で最初の出現だけを採用します。選択したcontract fileはsource inventoryとartifact collisionにも同じ順序・集合で反映されます。
 
 ### 出力profile

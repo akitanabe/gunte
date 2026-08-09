@@ -83,6 +83,41 @@ func TestEvaluateOccurrenceCountsSlicesAndSelectedArtifacts(t *testing.T) {
 	}
 }
 
+func TestEvaluateOccurrenceSliceMismatchRetainsArtifactSourceAndCounts(t *testing.T) {
+	position := config.ContractPosition{Path: "contracts.toml", Line: 7, Column: 3}
+	expected := int64(2)
+	artifact := serialize.Artifact{
+		TargetID: "one",
+		Path:     "out/a.md",
+		Bytes:    []byte("reviewer"),
+		Contracts: []serialize.Declaration{{
+			ID:            "span",
+			Source:        compile.SourcePosition{Path: "src/a.md", Offset: 42, Line: 4, Column: 5},
+			Emitted:       true,
+			ArtifactRange: source.Range{Start: 0, End: len("reviewer")},
+		}},
+	}
+	predicate := config.Contract{ID: "count", Kind: config.PredicateOccurrences, Slice: "span", Pattern: "reviewer", Count: &expected, AppliesTo: []string{"one"}, Position: position}
+	result, diagnostics := Evaluate(config.ContractRegistry{Contracts: []config.Contract{predicate}}, []serialize.Artifact{artifact})
+	if len(diagnostics) != 0 || len(result.Violations) != 1 {
+		t.Fatalf("slice occurrence mismatch = %#v, %#v", result, diagnostics)
+	}
+	actual := int64(1)
+	want := Violation{
+		Kind:          OccurrencesViolation,
+		PredicateID:   "count",
+		TargetID:      "one",
+		ArtifactPath:  "out/a.md",
+		Predicate:     position,
+		RelatedSource: []compile.SourcePosition{{Path: "src/a.md", Offset: 42, Line: 4, Column: 5}},
+		ActualCount:   &actual,
+		ExpectedCount: &expected,
+	}
+	if !reflect.DeepEqual(result.Violations[0], want) {
+		t.Fatalf("slice occurrence mismatch = %#v, want %#v", result.Violations[0], want)
+	}
+}
+
 func TestEvaluateScopedForbidsAndOccurrencesReportOwnerOnlyZeroSelection(t *testing.T) {
 	position := config.ContractPosition{Path: "contracts.toml", Line: 1, Column: 1}
 	for _, predicate := range []config.Contract{

@@ -1043,6 +1043,15 @@ profile = "markdown-v1"
 		t.Fatalf("emit = %#v", result)
 	}
 	for _, path := range []string{"AGENTS.md", "CLAUDE.md"} {
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatalf("emitted %s: %v", path, err)
+		}
+		if !bytes.Equal(data, []byte("hello\n")) {
+			t.Fatalf("emitted %s = %q, want %q", path, data, []byte("hello\n"))
+		}
+	}
+	for _, path := range []string{"AGENTS.md", "CLAUDE.md"} {
 		if err := os.WriteFile(filepath.Join(root, path), []byte("drift\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -1050,6 +1059,106 @@ profile = "markdown-v1"
 	result := runner.Run([]string{"check"})
 	if result.ExitCode != ExitFailure || !hasDiagnosticPath(result, "output_mismatch", "AGENTS.md") || !hasDiagnosticPath(result, "output_mismatch", "CLAUDE.md") {
 		t.Fatalf("check = %#v", result)
+	}
+}
+
+func TestEmitAndCheckRejectArtifactSymlinkWithoutFollowing(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		artifact string
+		prepare  func(t *testing.T, root string, expected []byte) (outside string)
+	}{
+		{
+			name:     "root target leaf",
+			artifact: "AGENTS.md",
+			prepare: func(t *testing.T, root string, expected []byte) string {
+				outside := filepath.Join(t.TempDir(), "artifact.md")
+				if err := os.WriteFile(outside, expected, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(root, "AGENTS.md")
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatal(err)
+				}
+				return outside
+			},
+		},
+		{
+			name:     "root target parent directory",
+			artifact: "generated/AGENTS.md",
+			prepare: func(t *testing.T, root string, expected []byte) string {
+				outside := filepath.Join(t.TempDir(), "generated")
+				if err := os.MkdirAll(outside, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(outside, "AGENTS.md"), expected, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.RemoveAll(filepath.Join(root, "generated")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(root, "generated")); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(outside, "AGENTS.md")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := writeVersionTwoProject(t)
+			projectPath := filepath.Join(root, "gunte.toml")
+			project, err := os.ReadFile(projectPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project = []byte(strings.Replace(string(project), `output_root = "out"`, `output_root = "."`, 1))
+			project = []byte(strings.Replace(string(project), `path = "a.md"`, `path = "`+test.artifact+`"`, 1))
+			if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runner := NewRunner(root)
+			if result := runner.Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+				t.Fatalf("lock = %#v", result)
+			}
+			if result := runner.Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+				t.Fatalf("setup emit = %#v", result)
+			}
+			artifactPath := filepath.Join(root, filepath.FromSlash(test.artifact))
+			expected, err := os.ReadFile(artifactPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outside := test.prepare(t, root, expected)
+			before, err := os.ReadFile(outside)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			artifactWriter := &recordingWriter{}
+			result := newRunnerWithWriter(root, artifactWriter).Run([]string{"emit"})
+			if result.ExitCode != ExitFailure || artifactWriter.count != 0 || !hasDiagnosticPath(result, "path_symlink", test.artifact) {
+				t.Fatalf("emit symlink result=%#v writes=%d", result, artifactWriter.count)
+			}
+			checkWriter := &recordingWriter{}
+			result = newRunnerWithWriter(root, checkWriter).Run([]string{"check"})
+			if result.ExitCode != ExitFailure || checkWriter.count != 0 || !hasDiagnosticPath(result, "path_symlink", test.artifact) {
+				t.Fatalf("check symlink result=%#v writes=%d", result, checkWriter.count)
+			}
+			result = NewRunner(root).Run([]string{"emit"})
+			if result.ExitCode != ExitFailure || !hasDiagnosticPath(result, "path_symlink", test.artifact) {
+				t.Fatalf("local emit symlink result=%#v", result)
+			}
+			after, err := os.ReadFile(outside)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("outside target changed: before=%q after=%q", before, after)
+			}
+		})
 	}
 }
 

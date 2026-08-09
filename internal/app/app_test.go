@@ -20,7 +20,7 @@ func TestRunRejectsUsageAndUnknownTarget(t *testing.T) {
 	runner := NewRunner(root)
 	for _, args := range [][]string{{}, {"unknown"}, {"emit", "extra"}, {"emit", "--target"}} {
 		result := runner.Run(args)
-		if result.ExitCode != ExitUsage {
+		if result.ExitCode != ExitUsage || len(result.Diagnostics) != 1 || result.Diagnostics[0].Message != "usage: gunte emit|check [--target ID] | gunte lock" {
 			t.Errorf("args %v exit = %d, want %d", args, result.ExitCode, ExitUsage)
 		}
 	}
@@ -429,6 +429,520 @@ func TestRunCheckReportsAllOutputMismatches(t *testing.T) {
 	}
 }
 
+func TestSpecVersionTwoLockBootstrapsAndCheckRequiresFullCanonicalLock(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	runner := NewRunner(root)
+	if result := runner.Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "gunte.lock.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("emit created lock: %v", err)
+	}
+	if result := runner.Run([]string{"check"}); result.ExitCode != ExitFailure || !hasDiagnostic(result, "lock_mismatch") {
+		t.Fatalf("check without lock = %#v", result)
+	}
+	if result := runner.Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("lock = %#v", result)
+	}
+	lockBefore, err := os.ReadFile(filepath.Join(root, "gunte.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run([]string{"check", "--target", "one"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("selected check = %#v", result)
+	}
+	if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte("[contracts.ban]\nkind = \"forbids\"\npattern = \"never-present\"\napplies_to = [\"one\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit after semantic change = %#v", result)
+	}
+	lockAfter, err := os.ReadFile(filepath.Join(root, "gunte.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(lockBefore, lockAfter) {
+		t.Fatalf("emit changed lock")
+	}
+	if result := runner.Run([]string{"check", "--target", "one"}); result.ExitCode != ExitFailure || !hasDiagnostic(result, "lock_mismatch") {
+		t.Fatalf("selected check with stale full lock = %#v", result)
+	}
+}
+
+func TestSpecVersionTwoLockDoesNotChangeWhenOnlySourceContentChanges(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	runner := NewRunner(root)
+	if result := runner.Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("initial lock = %#v", result)
+	}
+	before, err := os.ReadFile(filepath.Join(root, "gunte.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte("changed source body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("lock after source edit = %#v", result)
+	}
+	after, err := os.ReadFile(filepath.Join(root, "gunte.lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("source content changed lock bytes")
+	}
+}
+
+func TestLockCommandIsVersionTwoOnlyAndRejectsTargetOption(t *testing.T) {
+	v1Root := writeProject(t, projectFixture{targets: []targetFixture{{id: "one", root: "out"}}})
+	if result := NewRunner(v1Root).Run([]string{"lock"}); result.ExitCode != ExitFailure || !hasDiagnostic(result, "config_error") {
+		t.Fatalf("v1 lock = %#v", result)
+	}
+	v2Root := writeVersionTwoProject(t)
+	if result := NewRunner(v2Root).Run([]string{"lock", "--target", "one"}); result.ExitCode != ExitUsage || result.Diagnostics[0].Message != "usage: gunte emit|check [--target ID] | gunte lock" {
+		t.Fatalf("targeted lock = %#v", result)
+	}
+}
+
+func TestVersionFromSuppliesProjectVersionAndParticipatesInCollision(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("\xef\xbb\xbf 2.0 \r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = []byte(strings.Replace(string(project), `profile = "markdown-v1"`, "profile = \"plain-text-v1\"\nvalue_from = \"project:version\"", 1))
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result := NewRunner(root).Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "out", "a.md"))
+	if err != nil || string(got) != " 2.0 \n" {
+		t.Fatalf("artifact = %q, %v", got, err)
+	}
+
+	collisionRoot := writeVersionTwoProject(t)
+	projectPath = filepath.Join(collisionRoot, "gunte.toml")
+	project, err = os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = []byte(strings.Replace(string(project), `version_from = "VERSION"`, `version_from = "out/a.md"`, 1))
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(collisionRoot, "out"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(collisionRoot, "out", "a.md"), []byte("2.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result := NewRunner(collisionRoot).Run([]string{"emit"}); result.ExitCode != ExitFailure || !hasDiagnostic(result, "path_collision") {
+		t.Fatalf("version_from collision = %#v", result)
+	}
+}
+
+func TestV2CheckComparesSourceAndSelectedTargetManagedInventoryReadOnly(t *testing.T) {
+	root := writeInventoryVersionTwoProject(t)
+	runner := NewRunner(root)
+	if result := runner.Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("lock = %#v", result)
+	}
+	if result := runner.Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "keep"), []byte("kept\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "out", "generated", "allowed", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "out", "generated", "allowed", "nested", "kept.md"), []byte("kept\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "src", "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "out", "generated", "stale.md"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "unmanaged.txt"), []byte("outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writer := &recordingWriter{}
+	result := newRunnerWithWriter(root, writer).Run([]string{"check"})
+	if result.ExitCode != ExitFailure || writer.count != 0 {
+		t.Fatalf("inventory check = %#v writes=%d", result, writer.count)
+	}
+	if !hasDiagnosticPath(result, "inventory_mismatch", "src/empty") || !hasDiagnosticPath(result, "inventory_mismatch", "out/generated/stale.md") {
+		t.Fatalf("inventory diagnostics = %#v", result.Diagnostics)
+	}
+	if hasDiagnosticPath(result, "inventory_mismatch", "unmanaged.txt") {
+		t.Fatalf("scope-external path was reported: %#v", result.Diagnostics)
+	}
+}
+
+func TestV2CheckTargetSelectionStillChecksFullSourceCoverageButOnlySelectedOutputScope(t *testing.T) {
+	root := writeInventoryVersionTwoProject(t)
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Replace(string(project), `files = ["src/a.md"]`, `files = ["src/a.md", "src/unmatched.md"]`, 1)
+	text = strings.Replace(text, `match = "src/*.md"`, `match = "src/a.md"`, 1)
+	text += `[targets.two]
+output_root = "other"
+managed_roots = ["generated"]
+[[targets.two.rules]]
+match = "src/a.md"
+path = "generated/a.md"
+profile = "markdown-v1"
+`
+	if err := os.WriteFile(projectPath, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "unmatched.md"), []byte("unmatched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result := NewRunner(root).Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("lock = %#v", result)
+	}
+	if result := NewRunner(root).Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "stale.md"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "out", "generated", "stale.md"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "other", "generated", "stale.md"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := NewRunner(root).Run([]string{"check", "--target", "one"})
+	if result.ExitCode != ExitFailure || !hasDiagnosticPath(result, "unmatched_source", "src/unmatched.md") {
+		t.Fatalf("selected source coverage = %#v", result)
+	}
+	if !hasDiagnosticPath(result, "inventory_mismatch", "src/stale.md") || !hasDiagnosticPath(result, "inventory_mismatch", "out/generated/stale.md") {
+		t.Fatalf("full-source or selected-output inventory was not reported = %#v", result.Diagnostics)
+	}
+	if hasDiagnosticPath(result, "inventory_mismatch", "other/generated/stale.md") {
+		t.Fatalf("unselected output inventory was reported = %#v", result.Diagnostics)
+	}
+}
+
+func TestV2SourceInventoryTreatsManagedVersionFileAsExpectedLeaf(t *testing.T) {
+	for _, kind := range []string{"regular", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			root := writeInventoryVersionTwoProject(t)
+			projectPath := filepath.Join(root, "gunte.toml")
+			project, err := os.ReadFile(projectPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project = []byte(strings.Replace(string(project), `version_from = "VERSION"`, `version_from = "src/VERSION"`, 1))
+			if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "regular" {
+				if err := os.WriteFile(filepath.Join(root, "src", "VERSION"), []byte("2.0\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Symlink("../VERSION", filepath.Join(root, "src", "VERSION")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if result := NewRunner(root).Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+				t.Fatalf("lock = %#v", result)
+			}
+			if result := NewRunner(root).Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+				t.Fatalf("emit = %#v", result)
+			}
+			result := NewRunner(root).Run([]string{"check"})
+			if hasDiagnosticPath(result, "inventory_mismatch", "src/VERSION") {
+				t.Fatalf("version inventory = %#v", result.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestV2CheckDoesNotFollowDirectorySymlinkAndAllowsSymlinkAllowFile(t *testing.T) {
+	root := writeInventoryVersionTwoProject(t)
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = []byte(strings.Replace(string(project), `allow_files = ["src/keep"]`, `allow_files = ["src/keep", "src/link-file"]`, 1))
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("VERSION", filepath.Join(root, "src", "link-file")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("generated", filepath.Join(root, "src", "linked-dir")); err != nil {
+		t.Fatal(err)
+	}
+	if result := NewRunner(root).Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("lock = %#v", result)
+	}
+	if result := NewRunner(root).Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "out", "generated", "allowed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("..", filepath.Join(root, "out", "generated", "allowed", "link-dir")); err != nil {
+		t.Fatal(err)
+	}
+	result := NewRunner(root).Run([]string{"check"})
+	if result.ExitCode != ExitFailure || !hasDiagnosticPath(result, "inventory_mismatch", "src/linked-dir") {
+		t.Fatalf("symlink inventory = %#v", result.Diagnostics)
+	}
+	if hasDiagnosticPath(result, "inventory_mismatch", "out/generated/allowed/link-dir") {
+		t.Fatalf("allow directory descendant symlink was rejected = %#v", result.Diagnostics)
+	}
+	if hasDiagnosticPath(result, "inventory_mismatch", "src/link-file") {
+		t.Fatalf("allow file symlink was rejected = %#v", result.Diagnostics)
+	}
+}
+
+func writeInventoryVersionTwoProject(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"VERSION":        "2.0\n",
+		"src/a.md":       "hello\n",
+		"contracts.toml": "[contracts]\n",
+		"gunte.toml": `spec_version = 2
+[project]
+id = "p"
+version_from = "VERSION"
+[sources]
+files = ["src/a.md"]
+managed_roots = ["src"]
+allow_files = ["src/keep"]
+[targets.one]
+output_root = "out"
+managed_roots = ["generated"]
+allow_files = ["generated/README"]
+allow_dirs = ["generated/allowed"]
+[[targets.one.rules]]
+match = "src/*.md"
+path = "generated/a.md"
+profile = "markdown-v1"
+`,
+	}
+	for path, body := range files {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func TestInvalidValidationDoesNotCreateLock(t *testing.T) {
+	for _, mutate := range []func(string){
+		func(root string) {
+			if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("2.0\n\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		func(root string) {
+			if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte("<!-- @contract unused -->\nbody\n<!-- @/contract -->\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		root := writeVersionTwoProject(t)
+		mutate(root)
+		if result := NewRunner(root).Run([]string{"lock"}); result.ExitCode != ExitFailure {
+			t.Fatalf("invalid lock = %#v", result)
+		}
+		if _, err := os.Stat(filepath.Join(root, "gunte.lock.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("lock writer reached: %v", err)
+		}
+	}
+}
+
+func TestValidationFailuresPreserveExistingLockBytes(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(string)
+	}{
+		{name: "structure", mutate: func(root string) {
+			contracts := `[contracts.shape]
+kind = "structure"
+subject = "source_frontmatter"
+paths = ["src/*.md"]
+[[contracts.shape.assertions]]
+path = "missing"
+op = "exists"
+`
+			if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte(contracts), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "text contract", mutate: func(root string) {
+			contracts := `[contracts.required]
+kind = "requires"
+pattern = "missing"
+applies_to = ["one"]
+`
+			if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte(contracts), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "generation", mutate: func(root string) {
+			projectPath := filepath.Join(root, "gunte.toml")
+			project, err := os.ReadFile(projectPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project = []byte(strings.Replace(string(project), `profile = "markdown-v1"`, `profile = "json-v1"`, 1))
+			if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := writeVersionTwoProject(t)
+			lockPath := filepath.Join(root, "gunte.lock.json")
+			before := []byte("existing lock bytes\n")
+			if err := os.WriteFile(lockPath, before, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(root)
+			if result := NewRunner(root).Run([]string{"lock"}); result.ExitCode != ExitFailure {
+				t.Fatalf("lock = %#v", result)
+			}
+			after, err := os.ReadFile(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("lock changed: %q", after)
+			}
+		})
+	}
+}
+
+func TestSelectedEmitStillEvaluatesSourceStructureAcrossFullProject(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = append(project, []byte("[targets.two]\noutput_root = \"out/two\"\n[[targets.two.rules]]\nmatch = \"src/*.md\"\npath = \"a.md\"\nprofile = \"markdown-v1\"\n")...)
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte("+++\npolicy = false\n+++\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	contracts := `[contracts.policy]
+kind = "structure"
+subject = "source_frontmatter"
+paths = ["src/*.md"]
+[[contracts.policy.assertions]]
+path = "policy"
+op = "equals"
+value = true
+`
+	if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte(contracts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := newRunnerWithWriter(root, &recordingWriter{}).Run([]string{"emit", "--target", "one"})
+	if result.ExitCode != ExitFailure || !hasDiagnostic(result, "structure_violation") || result.Diagnostics[0].Path != "contracts.toml" || len(result.Diagnostics[0].Related) != 1 || result.Diagnostics[0].Related[0].Path != "src/a.md" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestArtifactStructureUsesProfileProvenanceAndTypedYAMLFrontmatter(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = []byte(strings.Replace(string(project), `profile = "markdown-v1"`, `profile = "markdown+yaml-frontmatter-v1"`, 1))
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte("---\nenabled: true\n---\nbody\n---\nignored: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	contracts := `[contracts.shape]
+kind = "structure"
+subject = "artifact"
+paths = ["out/a.md"]
+format = "yaml"
+applies_to = ["one"]
+[[contracts.shape.assertions]]
+path = "enabled"
+op = "equals"
+value = true
+`
+	if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte(contracts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result := NewRunner(root).Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte("---\nenabled: false\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := newRunnerWithWriter(root, &recordingWriter{}).Run([]string{"emit"})
+	if result.ExitCode != ExitFailure || !hasDiagnostic(result, "structure_violation") || result.Diagnostics[0].ArtifactPath != "out/a.md" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func writeVersionTwoProject(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"VERSION":        "2.0\n",
+		"src/a.md":       "hello\n",
+		"contracts.toml": "[contracts]\n",
+		"gunte.toml": `spec_version = 2
+[project]
+id = "p"
+version_from = "VERSION"
+[sources]
+files = ["src/a.md"]
+[targets.one]
+output_root = "out"
+[[targets.one.rules]]
+match = "src/*.md"
+path = "a.md"
+profile = "markdown-v1"
+`,
+	}
+	for path, body := range files {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
 type projectFixture struct {
 	targets       []targetFixture
 	sourceBody    string
@@ -514,6 +1028,15 @@ func (writer *recordingWriter) Write(path string, body []byte) error {
 func hasDiagnostic(result Result, kind string) bool {
 	for _, diagnostic := range result.Diagnostics {
 		if diagnostic.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDiagnosticPath(result Result, kind, path string) bool {
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Kind == kind && diagnostic.Path == path {
 			return true
 		}
 	}

@@ -4,6 +4,7 @@ package serialize
 
 import (
 	"github.com/akitanabe/gunte/internal/compile"
+	"github.com/akitanabe/gunte/internal/config"
 	"github.com/akitanabe/gunte/internal/source"
 )
 
@@ -22,6 +23,7 @@ type Artifact struct {
 	SourcePath string
 	Path       string
 	Bytes      []byte
+	Profile    config.Profile
 	Contracts  []Declaration
 	Anchors    []Declaration
 }

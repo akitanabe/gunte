@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -14,6 +15,32 @@ import (
 type matchDecision struct {
 	ruleIndex int
 	captures  []string
+}
+
+// UnmatchedSourcePaths returns source paths that do not match any rule in any
+// target. It is a pure coverage calculation used by the v2 check boundary;
+// target selection must not hide an unmatched source in another target.
+func UnmatchedSourcePaths(project config.ProjectConfig, sources []Source) []string {
+	result := make([]string, 0)
+	for _, source := range sources {
+		matched := false
+		for _, target := range project.Targets {
+			for _, rule := range target.Rules {
+				if _, ok := matchPath(rule.Match, sourcePath(source)); ok {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
+		}
+		if !matched {
+			result = append(result, sourcePath(source))
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 // Adapt resolves target rules, path templates, and metadata mappings. It is a
@@ -188,6 +215,9 @@ func validRelativePath(value string) bool {
 
 func semanticInputPaths(project config.ProjectConfig) map[string]bool {
 	paths := map[string]bool{"gunte.toml": true, "contracts.toml": true}
+	if project.Project.VersionFrom != "" {
+		paths[project.Project.VersionFrom] = true
+	}
 	for _, file := range project.Sources.Files {
 		paths[file] = true
 	}

@@ -1,5 +1,7 @@
 package source
 
+import "github.com/akitanabe/gunte/internal/typeddata"
+
 // Range is a half-open byte range [Start, End) in a normalized source buffer.
 type Range struct {
 	Start int
@@ -32,4 +34,5 @@ type Document struct {
 	FrontmatterRange *Range
 	BodyRange        Range
 	FrontmatterData  map[string]any
+	FrontmatterNode  *typeddata.Value
 }

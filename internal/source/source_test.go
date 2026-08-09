@@ -244,6 +244,33 @@ func TestParseFrontmatterRetainsNestedValuesAndLiteralTerms(t *testing.T) {
 	}
 }
 
+func TestParseRetainsNestedTOMLMappingDeclarationOrder(t *testing.T) {
+	document, diagnostics := Parse("source.md", []byte("+++\n[z]\nsecond = 2\nfirst = 1\n[z.nested]\nb = true\na = false\n+++\nbody\n"))
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	if document.FrontmatterNode == nil || document.FrontmatterNode.Map[0].Key != "z" {
+		t.Fatalf("root = %#v", document.FrontmatterNode)
+	}
+	z := document.FrontmatterNode.Map[0].Value
+	if got := []string{z.Map[0].Key, z.Map[1].Key, z.Map[2].Key}; got[0] != "second" || got[1] != "first" || got[2] != "nested" {
+		t.Fatalf("z keys = %v", got)
+	}
+}
+
+func TestParseKeepsLegacyFrontmatterMapWhenTypedStructureCannotRepresentValue(t *testing.T) {
+	document, diagnostics := Parse("source.md", []byte("+++\nreleased = 1979-05-27T07:32:00Z\n+++\nbody\n"))
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	if document.FrontmatterData["released"] == nil {
+		t.Fatalf("frontmatter map = %#v", document.FrontmatterData)
+	}
+	if document.FrontmatterNode != nil {
+		t.Fatalf("typed node = %#v, want unavailable", document.FrontmatterNode)
+	}
+}
+
 func TestParseFrontmatterReportsTOMLSyntaxPositionOnNormalizedBuffer(t *testing.T) {
 	input := []byte("+++\n[claude\ndescription = \"broken\"\n+++\nbody\n")
 	parts, diagnostics := Split(input)

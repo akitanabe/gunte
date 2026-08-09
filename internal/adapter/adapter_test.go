@@ -107,6 +107,21 @@ func TestAdaptMatchesLiteralAndWildcardRulesAcrossTargets(t *testing.T) {
 	}
 }
 
+func TestUnmatchedSourcePathsUseAllTargetsIndependentlyOfSelection(t *testing.T) {
+	project := config.ProjectConfig{Targets: []config.Target{
+		{ID: "one", Rules: []config.Rule{{Match: "one.md"}}},
+		{ID: "two", Rules: []config.Rule{{Match: "two.md"}}},
+	}}
+	sources := []Source{
+		{Projection: compile.SourceProjection{Path: "unmatched.md"}},
+		{Projection: compile.SourceProjection{Path: "two.md"}},
+	}
+	got := UnmatchedSourcePaths(project, sources)
+	if len(got) != 1 || got[0] != "unmatched.md" {
+		t.Fatalf("UnmatchedSourcePaths() = %#v", got)
+	}
+}
+
 func TestAdaptRejectsAmbiguousMatchAndInvalidTemplates(t *testing.T) {
 	project := config.ProjectConfig{Targets: []config.Target{{ID: "target", OutputRoot: "out", Rules: []config.Rule{{Match: "*.md", Path: "a/{1}.md", Profile: config.ProfileMarkdown}, {Match: "name.md", Path: "b.md", Profile: config.ProfileMarkdown}}}}}
 	_, diagnostics := Adapt(project, []Source{{Projection: compile.SourceProjection{Path: "name.md", Bytes: []byte("x")}}})

@@ -4,7 +4,7 @@
 
 Gunteは、単一の正本集合からClaude Code、Codexなどのtarget向け文書を生成する、prompt artifactのための契約検査つきコンパイラです。同じsemantic build inputから、同じartifact集合をバイト単位で決定論的に生成します。
 
-v1の保証範囲は、決定論的な生成と、生成時の`requires` / `forbids` / `order`契約検査です。正本仕様は[Issue #1: Gunte v1 正本SPEC](https://github.com/akitanabe/gunte/issues/1)（Spec-Version 1 / Doc-Rev 10）で管理しています。
+v1の保証範囲は、決定論的な生成と、生成時の`requires` / `forbids` / `order`契約検査です。正本仕様は[Issue #1: Gunte v1 正本SPEC](https://github.com/akitanabe/gunte/issues/1)（Spec-Version 1 / Doc-Rev 10）で管理しています。Spec-Version 2は`spec_version = 2`で選択する追加仕様で、v1の入力、bytes、CLI、target選択を変更しません。v2専用fieldやpredicateをv1で使うと拒否されます。
 
 Gunteが解決する問題と、避けるべき設計については[アンチパターン集](docs/gunte-antipatterns.md)を参照してください。
 
@@ -17,6 +17,38 @@ Gunteが解決する問題と、避けるべき設計については[アンチ�
 - 生成物の契約検査: 必須表現、禁止表現、span / anchorの順序を最終artifact上で検査する
 - 再現可能な出力: UTF-8、LF、末尾LF、キー順などをcanonical serializationで固定する
 - drift検出: `check`で現在の入力から生成されるbytesと既存artifactを比較する
+
+## Spec-Version 2
+
+v2ではversion file、managed inventory、typed structural contract、registry integrity、lock、target scopeを扱えます。詳細な正本仕様は[docs/gunte-spec.md](docs/gunte-spec.md)で確認できます。追加設定を組み合わせた最小例は次のとおりです。
+
+```toml
+spec_version = 2
+
+[project]
+id = "example"
+version_from = "VERSION"
+
+[sources]
+files = ["shared/guide.md"]
+managed_roots = ["shared"]
+allow_files = ["shared/README.md"]
+allow_dirs = ["shared/examples"]
+
+[targets.claude]
+output_root = "dist/claude"
+managed_roots = ["generated"]
+
+[contracts.guide-frontmatter]
+kind = "structure"
+subject = "source_frontmatter"
+paths = ["shared/*.md"]
+
+[[contracts.guide-frontmatter.assertions]]
+path = "claude.description"
+op = "equals"
+value = "Agent向けガイド"
+```
 
 ## 必要環境とインストール
 

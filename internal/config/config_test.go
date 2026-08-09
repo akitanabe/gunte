@@ -100,7 +100,7 @@ output_root = "out"
 	}{
 		{"spec version required", strings.Replace(base, "spec_version = 1\n", "", 1), "spec_version is required"},
 		{"spec version integer", strings.Replace(base, "spec_version = 1", `spec_version = "1"`, 1), "spec_version must be an integer"},
-		{"spec version one", strings.Replace(base, "spec_version = 1", "spec_version = 2", 1), "spec_version must be 1"},
+		{"supported spec version", strings.Replace(base, "spec_version = 1", "spec_version = 3", 1), "spec_version must be 1 or 2"},
 		{"project id required", strings.Replace(base, "id = \"p\"\n", "", 1), "project.id is required"},
 		{"opaque string nonempty", strings.Replace(base, `version = "v"`, `version = ""`, 1), "project.version must be non-empty"},
 		{"opaque string one line", strings.Replace(base, `version = "v"`, `version = """v\n2"""`, 1), "project.version must be a single-line string"},
@@ -782,7 +782,7 @@ applies_to = ["one"]
 }
 
 func TestValidationDiagnosticsAreAggregatedAndLocated(t *testing.T) {
-	input := []byte(`spec_version = 2
+	input := []byte(`spec_version = 3
 [project]
 id = ""
 version = "ok"
@@ -793,7 +793,7 @@ output_root = "out"
 `)
 	_, diagnostics := ParseProject("broken.toml", input)
 	want := map[string]struct{ line, column int }{
-		"spec_version must be 1":                       {1, 1},
+		"spec_version must be 1 or 2":                  {1, 1},
 		"project.id must be non-empty":                 {3, 1},
 		"sources.files must contain at least one path": {6, 1},
 	}
@@ -839,6 +839,201 @@ func TestSyntaxErrorIsLocated(t *testing.T) {
 	_, diagnostics := ParseProject("syntax.toml", []byte("spec_version = [\n"))
 	if len(diagnostics) != 1 || diagnostics[0].Path != "syntax.toml" || diagnostics[0].Line != 1 || diagnostics[0].Column < 1 {
 		t.Fatalf("syntax diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestSpecVersionTwoAcceptsExactlyOneVersionSource(t *testing.T) {
+	base := `spec_version = 2
+[project]
+id = "p"
+VERSION
+[sources]
+files = ["src/a.md"]
+[targets.one]
+output_root = "out"
+`
+	for _, version := range []string{`version = "literal"`, `version_from = "VERSION"`} {
+		project, diagnostics := ParseProject("gunte.toml", []byte(strings.Replace(base, "VERSION", version, 1)))
+		if len(diagnostics) != 0 {
+			t.Fatalf("%s diagnostics = %v", version, diagnostics)
+		}
+		if project.SpecVersion != 2 {
+			t.Fatalf("spec version = %d", project.SpecVersion)
+		}
+	}
+	for _, version := range []string{"", "version = \"literal\"\nversion_from = \"VERSION\""} {
+		_, diagnostics := ParseProject("gunte.toml", []byte(strings.Replace(base, "VERSION", version, 1)))
+		assertDiagnostic(t, diagnostics, "exactly one of project.version or project.version_from")
+	}
+}
+
+func TestSpecVersionOneRejectsVersionFromAsUnknownAndStillRequiresLiteralVersion(t *testing.T) {
+	input := []byte(`spec_version = 1
+[project]
+id = "p"
+version_from = "VERSION"
+[sources]
+files = ["src/a.md"]
+[targets.one]
+output_root = "out"
+`)
+	_, diagnostics := ParseProject("gunte.toml", input)
+	assertDiagnostic(t, diagnostics, "unknown key project.version_from")
+	assertDiagnostic(t, diagnostics, "project.version is required")
+}
+
+func TestSpecVersionTwoParsesManagedScopesAndAllowsTargetRelativePaths(t *testing.T) {
+	input := []byte(`spec_version = 2
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+managed_roots = ["src"]
+allow_files = ["src/keep"]
+allow_dirs = ["src/generated"]
+[targets.one]
+output_root = "out"
+managed_roots = ["artifacts"]
+allow_files = ["artifacts/README"]
+allow_dirs = ["artifacts/generated"]
+`)
+	project, diagnostics := ParseProject("gunte.toml", input)
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %v", diagnostics)
+	}
+	if got := project.Sources.ManagedRoots; !reflect.DeepEqual(got, []string{"src"}) {
+		t.Fatalf("source managed roots = %#v", got)
+	}
+	if got := project.Targets[0].AllowDirs; !reflect.DeepEqual(got, []string{"artifacts/generated"}) {
+		t.Fatalf("target allow dirs = %#v", got)
+	}
+}
+
+func TestSpecVersionOneRejectsManagedScopeKeys(t *testing.T) {
+	input := []byte(`spec_version = 1
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+managed_roots = ["src"]
+[targets.one]
+output_root = "out"
+allow_dirs = ["generated"]
+`)
+	_, diagnostics := ParseProject("gunte.toml", input)
+	assertDiagnostic(t, diagnostics, "unknown key sources.managed_roots")
+	assertDiagnostic(t, diagnostics, "unknown key targets.one.allow_dirs")
+}
+
+func TestSpecVersionTwoRejectsOverlappingRootsAndRedundantAllows(t *testing.T) {
+	input := []byte(`spec_version = 2
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+managed_roots = ["src"]
+allow_files = ["src/keep", "src/keep"]
+allow_dirs = ["src/generated", "src/generated/nested"]
+[targets.one]
+output_root = "out"
+managed_roots = ["artifacts"]
+[targets.two]
+output_root = "src"
+managed_roots = ["x"]
+`)
+	_, diagnostics := ParseProject("gunte.toml", input)
+	assertDiagnostic(t, diagnostics, "allow entries overlap")
+	assertDiagnostic(t, diagnostics, "redundantly contained")
+	assertDiagnostic(t, diagnostics, "managed root")
+}
+
+func TestSpecVersionTwoRejectsAllowOutsideExactlyOneManagedRoot(t *testing.T) {
+	input := []byte(`spec_version = 2
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+managed_roots = ["src/a", "src/b"]
+allow_files = ["outside"]
+[targets.one]
+output_root = "out"
+`)
+	_, diagnostics := ParseProject("gunte.toml", input)
+	assertDiagnostic(t, diagnostics, "allow file must be under exactly one managed root")
+}
+
+func TestSpecVersionTwoRejectsAllowEntryEqualToManagedRoot(t *testing.T) {
+	input := []byte(`spec_version = 2
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+managed_roots = ["src"]
+allow_files = ["src"]
+allow_dirs = ["src"]
+[targets.one]
+output_root = "out"
+`)
+	_, diagnostics := ParseProject("gunte.toml", input)
+	assertDiagnostic(t, diagnostics, "allow file must be under exactly one managed root")
+	assertDiagnostic(t, diagnostics, "allow directory must be under exactly one managed root")
+}
+
+func TestVersionFileNormalizationPreservesOpaqueSingleLineValue(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input []byte
+		want  string
+	}{
+		{name: "no newline", input: []byte(" v2 "), want: " v2 "},
+		{name: "one CRLF", input: []byte("\xef\xbb\xbf2.0\r\n"), want: "2.0"},
+		{name: "one bare CR", input: []byte("2.0\r"), want: "2.0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, diagnostic := NormalizeVersionFile("VERSION", test.input)
+			if diagnostic != nil || got != test.want {
+				t.Fatalf("NormalizeVersionFile() = %q, %#v; want %q", got, diagnostic, test.want)
+			}
+		})
+	}
+}
+
+func TestVersionFileNormalizationRejectsInvalidOrNonSingleLineValues(t *testing.T) {
+	for _, input := range [][]byte{{0xff}, {}, []byte("\xef\xbb\xbf"), []byte("a\nb"), []byte("a\n\n"), []byte("\xef\xbb\xbf\xef\xbb\xbfv")} {
+		if _, diagnostic := NormalizeVersionFile("VERSION", input); diagnostic == nil || diagnostic.Path != "VERSION" {
+			t.Errorf("input %q diagnostic = %#v", input, diagnostic)
+		}
+	}
+}
+
+func TestSpecVersionTwoValidatesSlicedPredicateIDAtItsDeclaration(t *testing.T) {
+	input := []byte(`[contracts.need-000000000000]
+kind = "requires"
+slice = "span"
+pattern = "wanted"
+applies_to = ["one"]
+`)
+	_, diagnostics := ParseContractsForSpec("contracts.toml", input, []string{"one"}, 2)
+	diagnostic := findDiagnostic(t, diagnostics, "predicate ID must be need-1bb12accd185")
+	if diagnostic.Line != 1 || diagnostic.Column != 1 {
+		t.Fatalf("predicate diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestSpecVersionTwoAcceptsCanonicalSlicedPredicateID(t *testing.T) {
+	input := []byte(`[contracts.need-1bb12accd185]
+kind = "requires"
+slice = "span"
+pattern = "wanted"
+applies_to = ["one"]
+`)
+	if _, diagnostics := ParseContractsForSpec("contracts.toml", input, []string{"one"}, 2); len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %v", diagnostics)
 	}
 }
 

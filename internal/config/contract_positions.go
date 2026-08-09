@@ -97,8 +97,18 @@ func topLevelInlinePredicates(line string, valueStart int) []inlinePredicatePosi
 			continue
 		}
 		fields := map[string]int{}
-		for _, field := range inlineAssignments(line[valueStart+assignment.valueStart : valueStart+assignment.valueEnd]) {
-			fields[field.key] = valueStart + assignment.valueStart + field.keyOffset
+		predicateStart := valueStart + assignment.valueStart
+		predicateValue := line[predicateStart : valueStart+assignment.valueEnd]
+		for _, field := range inlineAssignments(predicateValue) {
+			fields[field.key] = predicateStart + field.keyOffset
+			if field.key == "assertions" {
+				arrayValue := predicateValue[field.valueStart:field.valueEnd]
+				for index, element := range inlineArrayTableFields(arrayValue) {
+					for nestedField, offset := range element {
+						fields[formatIndex("assertions", index)+"."+nestedField] = predicateStart + field.valueStart + offset
+					}
+				}
+			}
 		}
 		result = append(result, inlinePredicatePosition{id: assignment.key, offset: valueStart + assignment.keyOffset, fields: fields})
 	}
@@ -257,7 +267,7 @@ func locateContractField(input []byte, keyPath string) (int, int, bool) {
 	if len(segments) < 3 || segments[0] != "contracts" {
 		return 0, 0, false
 	}
-	id, field := segments[1], segments[2]
+	id, field := segments[1], strings.Join(segments[2:], ".")
 	if len(segments) == 4 {
 		if array, index, ok := indexedKeySegment(segments[2]); ok {
 			if offset, found := locateInlineArrayElementField(input, id, array, index, segments[3]); found {

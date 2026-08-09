@@ -1233,6 +1233,39 @@ assertions = [
 	}
 }
 
+func TestTopLevelInlinePredicateLaterAssertionFieldUsesItsOwnExactPosition(t *testing.T) {
+	input := []byte(`contracts = { only = { kind = "structure", subject = "source_frontmatter", paths = ["src/a.md"], assertions = [{ path = "name", op = "exists" }, { path = "name", op = "invalid" }] } }
+`)
+	_, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "inline-assertions.toml", Bytes: input}}, []string{"one"}, 2)
+	diagnostic := findDiagnostic(t, diagnostics, "unknown assertion op")
+	wantColumn := strings.LastIndex(string(input), "op = \"invalid\"") + 1
+	if diagnostic.Path != "inline-assertions.toml" || diagnostic.Line != 1 || diagnostic.Column != wantColumn {
+		t.Fatalf("diagnostic = %#v, want column %d", diagnostic, wantColumn)
+	}
+}
+
+func TestTopLevelInlineAssertionFieldsKeepTheirElementOffsets(t *testing.T) {
+	tests := []struct {
+		name, second, field, message string
+	}{
+		{"path", `{ path = "", op = "exists" }`, "path", "assertion path must"},
+		{"value", `{ path = "name", op = "exists", value = "x" }`, "value", "value is not allowed for exists"},
+		{"count", `{ path = "name", op = "cardinality", count = -1 }`, "count", "count must be a non-negative integer"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := []byte(`contracts = { only = { kind = "structure", subject = "source_frontmatter", paths = ["src/a.md"], assertions = [{ path = "name", op = "exists" }, ` + test.second + `] } }
+`)
+			_, diagnostics := ParseContractDocuments([]ContractDocument{{Path: "inline-assertions.toml", Bytes: input}}, []string{"one"}, 2)
+			diagnostic := findDiagnostic(t, diagnostics, test.message)
+			wantColumn := strings.LastIndex(string(input), test.field+" =") + 1
+			if diagnostic.Line != 1 || diagnostic.Column != wantColumn {
+				t.Fatalf("diagnostic = %#v, want column %d", diagnostic, wantColumn)
+			}
+		})
+	}
+}
+
 func TestCrossFileDuplicatesAlwaysRelateToGlobalFirstInlinePredicate(t *testing.T) {
 	documents := []ContractDocument{
 		{Path: "a.toml", Bytes: []byte(`contracts = { same = { kind = "forbids", pattern = "a", applies_to = ["one"] } }`)},

@@ -36,6 +36,23 @@ func TestRunRejectsUsageAndUnknownTarget(t *testing.T) {
 	}
 }
 
+func TestViolationResultsPreserveOccurrenceCountsAndOwnership(t *testing.T) {
+	expected, actual := int64(2), int64(1)
+	violation := contract.Violation{
+		Kind:          contract.OccurrencesViolation,
+		PredicateID:   "count",
+		TargetID:      "one",
+		ArtifactPath:  "out/a.md",
+		Predicate:     config.ContractPosition{Path: "contracts.toml", Line: 4, Column: 1},
+		ActualCount:   &actual,
+		ExpectedCount: &expected,
+	}
+	result := violationResults([]contract.Violation{violation})
+	if len(result) != 1 || result[0].ActualCount == nil || *result[0].ActualCount != actual || result[0].ExpectedCount == nil || *result[0].ExpectedCount != expected || result[0].ArtifactPath != "out/a.md" || !strings.Contains(result[0].Message, "expected count 2, actual count 1") {
+		t.Fatalf("diagnostic = %#v", result)
+	}
+}
+
 func TestRunHelpDoesNotReadProjectOrWriteArtifacts(t *testing.T) {
 	reader := &countingReader{}
 	writer := &recordingWriter{}
@@ -420,12 +437,14 @@ func TestViolationMappingRetainsPredicateArtifactAndRelatedLocations(t *testing.
 		{Kind: contract.RequiresViolation, PredicateID: "need", TargetID: "one", ArtifactPath: "out/need.md", Predicate: predicate, RelatedSource: []compile.SourcePosition{before}},
 		{Kind: contract.ForbidsViolation, PredicateID: "ban", TargetID: "one", ArtifactPath: "out/ban.md", Predicate: predicate, RelatedSource: []compile.SourcePosition{before}},
 		{Kind: contract.OrderViolation, PredicateID: "order", TargetID: "one", ArtifactPath: "out/order.md", Predicate: predicate, RelatedSource: []compile.SourcePosition{before, after}},
+		{Kind: contract.OccurrencesViolation, PredicateID: "count", TargetID: "one", ArtifactPath: "out/count.md", Predicate: predicate, RelatedSource: []compile.SourcePosition{{Path: "src/count.md", Line: 1, Column: 1}}, ActualCount: int64PointerForAppTest(1), ExpectedCount: int64PointerForAppTest(2)},
 	}
 	result := violationResults(violations)
 	want := []Diagnostic{
 		{Kind: "requires_violation", Path: "contracts.toml", Line: 4, Column: 1, ArtifactPath: "out/need.md", Related: []Location{{Path: "source.md", Line: 2, Column: 3}}, Message: "predicate need failed for target one"},
 		{Kind: "forbids_violation", Path: "contracts.toml", Line: 4, Column: 1, ArtifactPath: "out/ban.md", Related: []Location{{Path: "source.md", Line: 2, Column: 3}}, Message: "predicate ban failed for target one"},
 		{Kind: "order_violation", Path: "contracts.toml", Line: 4, Column: 1, ArtifactPath: "out/order.md", Related: []Location{{Path: "source.md", Line: 2, Column: 3}, {Path: "source.md", Line: 5, Column: 2}}, Message: "predicate order failed for target one"},
+		{Kind: "occurrences_violation", Path: "contracts.toml", Line: 4, Column: 1, ArtifactPath: "out/count.md", Related: []Location{{Path: "src/count.md", Line: 1, Column: 1}}, ActualCount: int64PointerForAppTest(1), ExpectedCount: int64PointerForAppTest(2), Message: "predicate count failed for target one: expected count 2, actual count 1"},
 	}
 	for index := range want {
 		if !reflect.DeepEqual(result[index], want[index]) {
@@ -433,6 +452,8 @@ func TestViolationMappingRetainsPredicateArtifactAndRelatedLocations(t *testing.
 		}
 	}
 }
+
+func int64PointerForAppTest(value int64) *int64 { return &value }
 
 func TestRunDoesNotWriteWhenArtifactGenerationFails(t *testing.T) {
 	root := writeProject(t, projectFixture{targets: []targetFixture{{id: "one", root: "out/one"}, {id: "two", root: "out/two", profile: "json-v1"}}})

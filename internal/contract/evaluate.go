@@ -2,6 +2,8 @@ package contract
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/akitanabe/gunte/internal/compile"
 	"github.com/akitanabe/gunte/internal/config"
@@ -46,6 +48,10 @@ func evaluate(registry config.ContractRegistry, artifacts []serialize.Artifact, 
 			diagnostics = append(diagnostics, predicateDiagnostic(predicate, "pattern must be non-empty"))
 			continue
 		}
+		if predicate.Kind == config.PredicateOccurrences && (predicate.Count == nil || *predicate.Count < 0) {
+			diagnostics = append(diagnostics, predicateDiagnostic(predicate, "count must be a non-negative integer"))
+			continue
+		}
 		for _, targetID := range predicate.AppliesTo {
 			if len(selected) != 0 && !selected[targetID] {
 				continue
@@ -53,6 +59,9 @@ func evaluate(registry config.ContractRegistry, artifacts []serialize.Artifact, 
 			violations, targetDiagnostics := evaluatePredicate(predicate, targetID, artifacts)
 			diagnostics = append(diagnostics, targetDiagnostics...)
 			if len(targetDiagnostics) > 0 {
+				if hasInvalidPredicate(targetDiagnostics) {
+					break
+				}
 				continue
 			}
 			for _, violation := range violations {
@@ -61,6 +70,15 @@ func evaluate(registry config.ContractRegistry, artifacts []serialize.Artifact, 
 		}
 	}
 	return result, diagnostics
+}
+
+func hasInvalidPredicate(diagnostics []Diagnostic) bool {
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Kind == InvalidPredicate {
+			return true
+		}
+	}
+	return false
 }
 
 func targetSelection(ids []string) map[string]bool {
@@ -137,7 +155,11 @@ func evaluatePredicate(predicate config.Contract, targetID string, artifacts []s
 		return nil, nil
 	case config.PredicateForbids:
 		if predicate.Slice == "" {
-			for _, artifact := range artifactsForTarget(artifacts, targetID) {
+			selected, positiveMatch := selectArtifacts(predicate, targetID, artifacts)
+			if predicate.Paths != nil && !positiveMatch {
+				return nil, []Diagnostic{predicateDiagnostic(predicate, "selector matched no artifact for target")}
+			}
+			for _, artifact := range selected {
 				if Match(artifact.Bytes, predicate.Pattern) {
 					return []Violation{{Kind: ForbidsViolation, PredicateID: predicate.ID, TargetID: targetID, ArtifactPath: artifact.Path, Predicate: predicate.Position}}, nil
 				}
@@ -153,6 +175,38 @@ func evaluatePredicate(predicate config.Contract, targetID string, artifacts []s
 			return []Violation{violation(predicate, ForbidsViolation, targetID, declaration, nil)}, nil
 		}
 		return nil, nil
+	case config.PredicateOccurrences:
+		if predicate.Slice != "" {
+			declaration, diagnostics := resolveReference(predicate, targetID, predicate.Slice, false, artifacts)
+			if len(diagnostics) > 0 {
+				return nil, diagnostics
+			}
+			body := declaration.artifact.Bytes[declaration.declaration.ArtifactRange.Start:declaration.declaration.ArtifactRange.End]
+			actual := int64(CountMatches(body, predicate.Pattern))
+			if actual != *predicate.Count {
+				return []Violation{countViolation(predicate, targetID, declaration.artifact.Path, []compile.SourcePosition{declaration.declaration.Source}, actual)}, nil
+			}
+			return nil, nil
+		}
+		if len(predicate.Paths) == 0 {
+			return nil, []Diagnostic{predicateDiagnostic(predicate, "paths must contain at least one pattern for artifact occurrences")}
+		}
+		selected, _ := selectArtifacts(predicate, targetID, artifacts)
+		if len(selected) == 0 {
+			return nil, []Diagnostic{predicateDiagnostic(predicate, "selector matched no artifact for target")}
+		}
+		var violations []Violation
+		for _, artifact := range selected {
+			actual := int64(CountMatches(artifact.Bytes, predicate.Pattern))
+			if actual != *predicate.Count {
+				var related []compile.SourcePosition
+				if artifact.SourcePath != "" {
+					related = []compile.SourcePosition{{Path: artifact.SourcePath, Line: 1, Column: 1}}
+				}
+				violations = append(violations, countViolation(predicate, targetID, artifact.Path, related, actual))
+			}
+		}
+		return violations, nil
 	case config.PredicateOrder:
 		before, beforeDiagnostics := resolveReference(predicate, targetID, predicate.Before, true, artifacts)
 		after, afterDiagnostics := resolveReference(predicate, targetID, predicate.After, true, artifacts)
@@ -209,14 +263,58 @@ func resolveReference(predicate config.Contract, targetID, id string, allowAncho
 	return anchors[0], nil
 }
 
-func artifactsForTarget(artifacts []serialize.Artifact, targetID string) []serialize.Artifact {
+func selectArtifacts(predicate config.Contract, targetID string, artifacts []serialize.Artifact) ([]serialize.Artifact, bool) {
+	positive := predicate.Paths != nil
+	positiveMatch := false
+	excluded := func(path string) bool {
+		for _, pattern := range predicate.ExcludePaths {
+			if selectorMatch(pattern, path) {
+				return true
+			}
+		}
+		return false
+	}
+	included := func(path string) bool {
+		if !positive {
+			return true
+		}
+		for _, pattern := range predicate.Paths {
+			if selectorMatch(pattern, path) {
+				return true
+			}
+		}
+		return false
+	}
+	seen := map[string]bool{}
 	result := make([]serialize.Artifact, 0)
 	for _, artifact := range artifacts {
-		if artifact.TargetID == targetID {
-			result = append(result, artifact)
+		if artifact.TargetID != targetID || !included(artifact.Path) {
+			continue
 		}
+		if positive {
+			positiveMatch = true
+		}
+		if excluded(artifact.Path) || seen[artifact.Path] {
+			continue
+		}
+		seen[artifact.Path] = true
+		result = append(result, artifact)
 	}
-	return result
+	return result, positiveMatch
+}
+
+func selectorMatch(pattern, value string) bool {
+	var expression strings.Builder
+	expression.WriteByte('^')
+	for _, character := range pattern {
+		if character == '*' {
+			expression.WriteString("[^/]*")
+			continue
+		}
+		expression.WriteString(regexp.QuoteMeta(string(character)))
+	}
+	expression.WriteByte('$')
+	return regexp.MustCompile(expression.String()).MatchString(value)
 }
 
 func emptySlice(value []byte) bool {
@@ -236,6 +334,21 @@ func violation(predicate config.Contract, kind ViolationKind, targetID string, r
 	related = append(related, extra...)
 	return Violation{Kind: kind, PredicateID: predicate.ID, TargetID: targetID, ArtifactPath: reference.artifact.Path, Predicate: predicate.Position, RelatedSource: related}
 }
+
+func countViolation(predicate config.Contract, targetID, artifactPath string, related []compile.SourcePosition, actual int64) Violation {
+	return Violation{
+		Kind:          OccurrencesViolation,
+		PredicateID:   predicate.ID,
+		TargetID:      targetID,
+		ArtifactPath:  artifactPath,
+		Predicate:     predicate.Position,
+		RelatedSource: related,
+		ActualCount:   int64Pointer(actual),
+		ExpectedCount: predicate.Count,
+	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func predicateDiagnostic(predicate config.Contract, message string) Diagnostic {
 	return Diagnostic{Kind: InvalidPredicate, PredicateID: predicate.ID, Predicate: predicate.Position, Message: message}

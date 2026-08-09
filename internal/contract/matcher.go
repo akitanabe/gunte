@@ -11,13 +11,21 @@ type patternPart struct {
 // Matching is byte exact for UTF-8, except that each pattern whitespace run is
 // matched by one or more ASCII SP/HTAB/LF bytes.
 func Match(body []byte, pattern string) bool {
+	return CountMatches(body, pattern) > 0
+}
+
+// CountMatches counts left-to-right, non-overlapping pattern matches under
+// the contract token rules. It is byte exact for UTF-8, except that each
+// pattern whitespace run is matched by one or more ASCII SP/HTAB/LF bytes.
+func CountMatches(body []byte, pattern string) int {
 	parts := parsePattern([]byte(pattern))
 	if len(parts) == 0 {
-		return false
+		return 0
 	}
 	firstID := asciiIdentifier(pattern[0])
 	last := []byte(pattern)
 	lastID := len(last) > 0 && asciiIdentifier(last[len(last)-1])
+	count := 0
 	for start := 0; start < len(body); start++ {
 		if firstID && leftBoundaryBlocked(body, start) {
 			continue
@@ -29,9 +37,12 @@ func Match(body []byte, pattern string) bool {
 		if lastID && rightBoundaryBlocked(body, end) {
 			continue
 		}
-		return true
+		count++
+		// A match consumes its entire span. This is intentionally non-
+		// overlapping; a failed candidate continues at the next byte.
+		start = end - 1
 	}
-	return false
+	return count
 }
 
 // The external contract forbids matching an agent-name suffix across a hyphen,

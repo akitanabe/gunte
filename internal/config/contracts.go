@@ -48,11 +48,26 @@ func (v *validator) contracts(root map[string]any, order []toml.Key, knownTarget
 			registry.Contracts = append(registry.Contracts, contract)
 			continue
 		}
-		v.unknownKeys(prefix, values, "kind", "slice", "pattern", "before", "after", "applies_to")
+		knownKeys := []string{"kind", "slice", "pattern", "before", "after", "applies_to"}
+		if v.specVersion == 2 {
+			knownKeys = append(knownKeys, "paths", "exclude_paths", "count")
+		}
+		v.unknownKeys(prefix, values, knownKeys...)
 		contract.Slice = optionalString(v, values, prefix, "slice")
 		contract.Pattern = optionalString(v, values, prefix, "pattern")
 		contract.Before = optionalString(v, values, prefix, "before")
 		contract.After = optionalString(v, values, prefix, "after")
+		if contract.Kind == PredicateForbids || contract.Kind == PredicateOccurrences {
+			contract.Paths = v.optionalSelectorPaths(values, prefix, "paths")
+			contract.ExcludePaths = v.optionalSelectorPaths(values, prefix, "exclude_paths")
+		}
+		if raw, exists := values["count"]; exists {
+			if count, ok := raw.(int64); ok && count >= 0 {
+				contract.Count = &count
+			} else {
+				v.add(prefix+".count", "count must be a non-negative integer")
+			}
+		}
 		contract.AppliesTo = v.appliesTo(values, prefix, targets)
 		v.validateContract(contract, values, prefix)
 		registry.Contracts = append(registry.Contracts, contract)
@@ -102,12 +117,29 @@ func (v *validator) structurePaths(values map[string]any, prefix string) []strin
 		v.add(prefix+".paths", "paths must contain at least one pattern")
 		return nil
 	}
+	return v.selectorPaths(raw, prefix+".paths", "paths")
+}
+
+func (v *validator) optionalSelectorPaths(values map[string]any, prefix, field string) []string {
+	rawValue, exists := values[field]
+	if !exists {
+		return nil
+	}
+	raw, ok := array(rawValue)
+	if !ok || len(raw) == 0 {
+		v.add(prefix+"."+field, field+" must contain at least one pattern")
+		return nil
+	}
+	return v.selectorPaths(raw, prefix+"."+field, field)
+}
+
+func (v *validator) selectorPaths(raw []any, prefix, field string) []string {
 	result := make([]string, 0, len(raw))
 	for i, item := range raw {
-		key := formatIndex(prefix+".paths", i)
+		key := formatIndex(prefix, i)
 		pattern, ok := stringValue(item)
 		if !ok {
-			v.add(key, "paths entries must be strings")
+			v.add(key, field+" entries must be strings")
 			continue
 		}
 		result = append(result, pattern)
@@ -357,13 +389,18 @@ func (v *validator) appliesTo(values map[string]any, prefix string, targets map[
 
 func (v *validator) validateContract(contract Contract, values map[string]any, prefix string) {
 	allowed := map[PredicateKind]map[string]bool{
-		PredicateRequires: {"kind": true, "slice": true, "pattern": true, "applies_to": true},
-		PredicateForbids:  {"kind": true, "slice": true, "pattern": true, "applies_to": true},
-		PredicateOrder:    {"kind": true, "before": true, "after": true, "applies_to": true},
+		PredicateRequires:    {"kind": true, "slice": true, "pattern": true, "applies_to": true},
+		PredicateForbids:     {"kind": true, "slice": true, "pattern": true, "paths": true, "exclude_paths": true, "applies_to": true},
+		PredicateOccurrences: {"kind": true, "slice": true, "pattern": true, "paths": true, "exclude_paths": true, "count": true, "applies_to": true},
+		PredicateOrder:       {"kind": true, "before": true, "after": true, "applies_to": true},
 	}
 	fields, known := allowed[contract.Kind]
 	if !known {
-		v.add(prefix+".kind", "kind must be one of requires, forbids, order")
+		message := "kind must be one of requires, forbids, order"
+		if v.specVersion == 2 {
+			message = "kind must be one of requires, forbids, occurrences, order"
+		}
+		v.add(prefix+".kind", message)
 		return
 	}
 	for _, field := range sortedKeys(values) {
@@ -377,6 +414,12 @@ func (v *validator) validateContract(contract Contract, values map[string]any, p
 	}
 	if contract.Kind == PredicateForbids {
 		required = append(required, "pattern")
+	}
+	if contract.Kind == PredicateOccurrences {
+		required = append(required, "pattern", "count")
+		if contract.Slice == "" {
+			required = append(required, "paths")
+		}
 	}
 	if contract.Kind == PredicateOrder {
 		required = append(required, "before", "after")
@@ -396,6 +439,25 @@ func (v *validator) validateContract(contract Contract, values map[string]any, p
 	validateReferenceID(v, prefix+".slice", "slice", contract.Slice, values["slice"] != nil)
 	validateReferenceID(v, prefix+".before", "before", contract.Before, values["before"] != nil)
 	validateReferenceID(v, prefix+".after", "after", contract.After, values["after"] != nil)
+	if contract.Kind == PredicateForbids && contract.Slice != "" && (values["paths"] != nil || values["exclude_paths"] != nil) {
+		if values["paths"] != nil {
+			v.add(prefix+".paths", "paths is not allowed when slice is set for forbids")
+		}
+		if values["exclude_paths"] != nil {
+			v.add(prefix+".exclude_paths", "exclude_paths is not allowed when slice is set for forbids")
+		}
+	}
+	if contract.Kind == PredicateOccurrences && contract.Slice != "" {
+		if values["paths"] != nil {
+			v.add(prefix+".paths", "paths is not allowed when slice is set for occurrences")
+		}
+		if values["exclude_paths"] != nil {
+			v.add(prefix+".exclude_paths", "exclude_paths is not allowed when slice is set for occurrences")
+		}
+	}
+	if contract.Kind != PredicateOccurrences && values["count"] != nil {
+		v.add(prefix+".count", "count is not allowed for "+string(contract.Kind))
+	}
 }
 
 func validateReferenceID(v *validator, key, label, value string, present bool) {

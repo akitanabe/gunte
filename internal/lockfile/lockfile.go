@@ -79,13 +79,25 @@ func ContractPreimage(predicate config.Contract) []byte {
 	if predicate.Kind == config.PredicateStructure {
 		return structurePreimage(predicate)
 	}
-	return []byte("{\"type\":\"text\",\"id\":" + canonicaljson.String(predicate.ID) +
+	result := "{\"type\":\"text\",\"id\":" + canonicaljson.String(predicate.ID) +
 		",\"kind\":" + canonicaljson.String(string(predicate.Kind)) +
 		",\"slice\":" + optional(predicate.Slice) +
 		",\"pattern\":" + optional(predicate.Pattern) +
 		",\"before\":" + optional(predicate.Before) +
 		",\"after\":" + optional(predicate.After) +
-		",\"applies_to\":" + canonicaljson.StringArray(predicate.AppliesTo) + "}\n")
+		",\"applies_to\":" + canonicaljson.StringArray(predicate.AppliesTo)
+	if predicate.Kind == config.PredicateOccurrences || predicate.Paths != nil || predicate.ExcludePaths != nil {
+		result += ",\"paths\":" + canonicaljson.StringArray(predicate.Paths) +
+			",\"exclude_paths\":" + canonicaljson.StringArray(predicate.ExcludePaths)
+	}
+	if predicate.Kind == config.PredicateOccurrences {
+		if predicate.Count == nil {
+			result += ",\"count\":null"
+		} else {
+			result += ",\"count\":" + strconv.FormatInt(*predicate.Count, 10)
+		}
+	}
+	return []byte(result + "}\n")
 }
 
 func structurePreimage(contract config.Contract) []byte {

@@ -37,11 +37,11 @@ checkはmanaged rootだけをread-only再帰走査する。source期待fileはse
 
 ## V2-03 typed structural contract
 
-v2 [contracts.<id>] kind = "structure" は subject, paths, assertions を持つ。subjectはsource_frontmatterまたはartifact。pathsはproject相対anchored patternで、*はslashを跨がず**はない。source_frontmatterはTOMLでformat/applies_toを持たない。artifactはformat = "yaml" | "toml" | "json" と非空既知targetのapplies_toを必須とし、yaml/toml/jsonは各々markdown+yaml-frontmatter-v1/toml-v1/json-v1 profileだけに適用する。selector 0 matchはV2-05の対象scopeのfailure、複数pattern一致documentは一度だけ評価する。
+v2 [contracts.<id>] kind = "structure" は subject, paths, assertions を持つ。subjectはsource_frontmatterまたはartifact。pathsはproject相対anchored patternで、*はslashを跨がず**はない。source_frontmatterはTOMLでformat/applies_toを持たない。artifactはformat = "yaml" | "toml" | "json" と非空既知targetのapplies_toを必須とし、yamlはmarkdown+yaml-frontmatter-v1の厳密な先頭frontmatter blockまたはmarkdown-v1の全artifact bytes、toml/jsonは各々toml-v1/json-v1 profileだけに適用する。selector 0 matchはV2-05の対象scopeのfailure、複数pattern一致documentは一度だけ評価する。
 
-assertion pathはdot segmentで、*はmappingの保持された宣言順またはlist index順に展開し、順序付きnode列を返す。existsは件数1以上、absentは0、cardinalityはcount完全一致。equalsはexactly one nodeとtyped deep equality、exact_keysはexactly one mappingと重複なしstring valueのkey set一致、list_orderはexactly one listとtyped array順序一致、list_setはexactly one scalar-only listでactual/expected双方重複なしのtyped set一致。operand欠落/余分/type不正はconfig error、その他のtruth failureはcontract failure。各selected documentに全assertionを適用する。
+assertion pathは空文字のdocument rootまたはdot segmentで、*はmappingの保持された宣言順またはlist index順に展開し、順序付きnode列を返す。existsは件数1以上、absentは0、cardinalityはcount完全一致。equalsはexactly one nodeとtyped deep equality、exact_keysはexactly one mappingと重複なしstring valueのkey set一致、list_orderはexactly one listとtyped array順序一致、list_setはexactly one scalar-only listでactual/expected双方重複なしのtyped set一致。operand欠落/余分/type不正はconfig error、その他のtruth failureはcontract failure。各selected documentに全assertionを適用する。
 
-source frontmatter parserはv1 adapter用mapに加えてnested mappingの宣言順を持つordered node Dataを生成し、structure evaluatorだけがordered nodeを使う。artifact YAMLは先頭frontmatterのopening ---直後から対応する最初のclosing ---直前だけをstrict Node decodeし、後続Markdownを含めない。mapping duplicate keyはlast-win前に失敗する。TOML/JSONも各strict parserのduplicate拒否を維持する。typed calculationはI/Oを行わない。
+source frontmatter parserはv1 adapter用mapに加えてnested mappingの宣言順を持つordered node Dataを生成し、structure evaluatorだけがordered nodeを使う。artifact YAMLはmarkdown+yaml-frontmatter-v1なら先頭frontmatterのopening ---直後から対応する最初のclosing ---直前だけを、markdown-v1なら全bytesを、各々exactly one YAML documentとしてstrict Node decodeする。mapping duplicate keyはlast-win前に失敗する。TOML/JSONも各strict parserのduplicate拒否を維持する。typed calculationはI/Oを行わない。
 
 ## V2-04 registry integrity and lock
 

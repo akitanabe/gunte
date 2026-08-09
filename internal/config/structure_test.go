@@ -28,6 +28,25 @@ value = true
 	}
 }
 
+func TestV2StructureAssertionAllowsDocumentRootPath(t *testing.T) {
+	input := []byte(`[contracts.shape]
+kind = "structure"
+subject = "artifact"
+paths = ["out/*.md"]
+format = "yaml"
+applies_to = ["codex"]
+
+[[contracts.shape.assertions]]
+path = ""
+op = "exact_keys"
+value = ["policy"]
+`)
+	registry, diagnostics := ParseContractsForSpec("contracts.toml", input, []string{"codex"}, 2)
+	if len(diagnostics) != 0 || len(registry.Contracts) != 1 || registry.Contracts[0].Assertions[0].Path != "" {
+		t.Fatalf("registry = %#v, diagnostics = %#v", registry, diagnostics)
+	}
+}
+
 func TestV1RejectsStructureAsUnknownKind(t *testing.T) {
 	input := []byte("[contracts.shape]\nkind = \"structure\"\nsubject = \"source_frontmatter\"\npaths = [\"src/*.md\"]\nassertions = []\n")
 	_, diagnostics := ParseContractsForSpec("contracts.toml", input, []string{"codex"}, 1)

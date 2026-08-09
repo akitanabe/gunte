@@ -76,12 +76,11 @@ func EvaluateArtifacts(registry config.ContractRegistry, artifacts []serialize.A
 					continue
 				}
 				matched++
-				wantProfile := map[config.StructureFormat]config.Profile{config.StructureYAML: config.ProfileYAML, config.StructureTOML: config.ProfileTOML, config.StructureJSON: config.ProfileJSON}[contract.Format]
-				if artifact.Profile != wantProfile {
+				if !profileMatches(contract.Format, artifact.Profile) {
 					failures = append(failures, failure(contract, target, artifact.Path, artifact.SourcePath, "artifact profile does not match structure format"))
 					continue
 				}
-				node, err := decode(contract.Format, artifact.Bytes)
+				node, err := decode(contract.Format, artifact.Profile, artifact.Bytes)
 				if err != nil {
 					failures = append(failures, failure(contract, target, artifact.Path, artifact.SourcePath, err.Error()))
 					continue
@@ -125,13 +124,20 @@ func globMatch(pattern, value string) bool {
 func evaluateAssertions(c config.Contract, target, artifact, related string, root typeddata.Value) []Failure {
 	var failures []Failure
 	for _, assertion := range c.Assertions {
-		nodes := resolve(root, strings.Split(assertion.Path, "."))
+		nodes := resolveAssertionPath(root, assertion.Path)
 		ok := assertionTrue(assertion, nodes)
 		if !ok {
 			failures = append(failures, failure(c, target, artifact, related, fmt.Sprintf("assertion %s %s failed with %d matching nodes", assertion.Path, assertion.Op, len(nodes))))
 		}
 	}
 	return failures
+}
+
+func resolveAssertionPath(root typeddata.Value, pathValue string) []typeddata.Value {
+	if pathValue == "" {
+		return []typeddata.Value{root}
+	}
+	return resolve(root, strings.Split(pathValue, "."))
 }
 
 func resolve(root typeddata.Value, segments []string) []typeddata.Value {
@@ -235,10 +241,23 @@ func scalarKey(v typeddata.Value) (string, bool) {
 	return "", false
 }
 
-func decode(format config.StructureFormat, data []byte) (typeddata.Value, error) {
+func profileMatches(format config.StructureFormat, profile config.Profile) bool {
 	switch format {
 	case config.StructureYAML:
-		return decodeYAML(data)
+		return profile == config.ProfileYAML || profile == config.ProfileMarkdown
+	case config.StructureTOML:
+		return profile == config.ProfileTOML
+	case config.StructureJSON:
+		return profile == config.ProfileJSON
+	default:
+		return false
+	}
+}
+
+func decode(format config.StructureFormat, profile config.Profile, data []byte) (typeddata.Value, error) {
+	switch format {
+	case config.StructureYAML:
+		return decodeYAML(profile, data)
 	case config.StructureTOML:
 		return decodeTOML(data)
 	case config.StructureJSON:
@@ -247,35 +266,47 @@ func decode(format config.StructureFormat, data []byte) (typeddata.Value, error)
 	return typeddata.Value{}, fmt.Errorf("unsupported structure format")
 }
 
-func decodeYAML(data []byte) (typeddata.Value, error) {
-	if !bytes.HasPrefix(data, []byte("---\n")) {
-		return typeddata.Value{}, fmt.Errorf("YAML artifact must start with exact frontmatter delimiter")
-	}
-	rest := data[4:]
-	end := -1
-	offset := 0
-	for _, line := range bytes.SplitAfter(rest, []byte("\n")) {
-		trim := bytes.TrimSuffix(line, []byte("\n"))
-		if bytes.Equal(trim, []byte("---")) {
-			end = offset
-			break
+func decodeYAML(profile config.Profile, data []byte) (typeddata.Value, error) {
+	yamlBytes := data
+	valueName := "artifact"
+	if profile == config.ProfileYAML {
+		valueName = "frontmatter"
+		if !bytes.HasPrefix(data, []byte("---\n")) {
+			return typeddata.Value{}, fmt.Errorf("YAML artifact must start with exact frontmatter delimiter")
 		}
-		offset += len(line)
-	}
-	if end < 0 {
-		return typeddata.Value{}, fmt.Errorf("YAML artifact has no exact closing frontmatter delimiter")
+		rest := data[4:]
+		end := -1
+		offset := 0
+		for _, line := range bytes.SplitAfter(rest, []byte("\n")) {
+			trim := bytes.TrimSuffix(line, []byte("\n"))
+			if bytes.Equal(trim, []byte("---")) {
+				end = offset
+				break
+			}
+			offset += len(line)
+		}
+		if end < 0 {
+			return typeddata.Value{}, fmt.Errorf("YAML artifact has no exact closing frontmatter delimiter")
+		}
+		yamlBytes = rest[:end]
 	}
 	var document yaml.Node
-	decoder := yaml.NewDecoder(bytes.NewReader(rest[:end]))
+	decoder := yaml.NewDecoder(bytes.NewReader(yamlBytes))
 	if err := decoder.Decode(&document); err != nil {
-		return typeddata.Value{}, fmt.Errorf("invalid YAML frontmatter: %w", err)
+		return typeddata.Value{}, fmt.Errorf("invalid YAML %s: %w", valueName, err)
 	}
 	var extra yaml.Node
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return typeddata.Value{}, fmt.Errorf("YAML frontmatter must contain exactly one document")
+		if profile == config.ProfileYAML {
+			return typeddata.Value{}, fmt.Errorf("YAML frontmatter must contain exactly one document")
+		}
+		return typeddata.Value{}, fmt.Errorf("YAML artifact must contain exactly one YAML document")
 	}
 	if len(document.Content) != 1 {
-		return typeddata.Value{}, fmt.Errorf("YAML frontmatter must contain one document")
+		if profile == config.ProfileYAML {
+			return typeddata.Value{}, fmt.Errorf("YAML frontmatter must contain one document")
+		}
+		return typeddata.Value{}, fmt.Errorf("YAML artifact must contain one document")
 	}
 	return yamlValue(document.Content[0], "")
 }

@@ -1248,7 +1248,7 @@ func TestDiagnosticsPointToTheirOwnFields(t *testing.T) {
 	tests := []struct {
 		name, second, field, message string
 	}{
-		{"path", `{ path = "", op = "exists" }`, "path", "assertion path must"},
+		{"path", `{ path = ".", op = "exists" }`, "path", "assertion path must"},
 		{"value", `{ path = "name", op = "exists", value = "x" }`, "value", "value is not allowed for exists"},
 		{"count", `{ path = "name", op = "cardinality", count = -1 }`, "count", "count must be a non-negative integer"},
 	}

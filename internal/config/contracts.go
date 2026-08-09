@@ -179,7 +179,7 @@ func (v *validator) structureAssertion(raw any, prefix string) StructureAssertio
 
 func validAssertionPath(value string) bool {
 	if value == "" {
-		return false
+		return true
 	}
 	for _, segment := range strings.Split(value, ".") {
 		if segment == "" {

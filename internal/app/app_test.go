@@ -1025,8 +1025,120 @@ value = true
 		t.Fatal(err)
 	}
 	result := newRunnerWithWriter(root, &recordingWriter{}).Run([]string{"emit"})
-	if result.ExitCode != ExitFailure || !hasDiagnostic(result, "structure_violation") || result.Diagnostics[0].ArtifactPath != "out/a.md" {
+	if result.ExitCode != ExitFailure || !hasDiagnostic(result, "structure_violation") || result.Diagnostics[0].Path != "contracts.toml" || result.Diagnostics[0].Line != 1 || result.Diagnostics[0].ArtifactPath != "out/a.md" || len(result.Diagnostics[0].Related) != 1 || result.Diagnostics[0].Related[0].Path != "src/a.md" {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestArtifactStructureValidatesWholeMarkdownProfileAsYAML(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte("true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	contracts := `[contracts.shape]
+kind = "structure"
+subject = "artifact"
+paths = ["out/a.md"]
+format = "yaml"
+applies_to = ["one"]
+[[contracts.shape.assertions]]
+path = ""
+op = "equals"
+value = true
+`
+	if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte(contracts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if result := NewRunner(root).Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("initial emit = %#v", result)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte("false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := newRunnerWithWriter(root, &recordingWriter{}).Run([]string{"emit"})
+	if result.ExitCode != ExitFailure || len(result.Diagnostics) != 1 || result.Diagnostics[0].Kind != "structure_violation" || result.Diagnostics[0].Path != "contracts.toml" || result.Diagnostics[0].ArtifactPath != "out/a.md" || len(result.Diagnostics[0].Related) != 1 || result.Diagnostics[0].Related[0].Path != "src/a.md" {
+		t.Fatalf("mutated emit = %#v", result)
+	}
+}
+
+func TestArtifactStructureRawYAMLSourceMutationsFailBeforeWriterWithOwnership(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		assertion  string
+		wantReason string
+	}{
+		{
+			name: "top-level extra key",
+			body: "policy:\n  enabled: true\nextra: false\n",
+			assertion: `[[contracts.shape.assertions]]
+path = ""
+op = "exact_keys"
+value = ["policy"]`,
+			wantReason: "exact_keys",
+		},
+		{
+			name: "nested extra policy key",
+			body: "policy:\n  enabled: true\n  extra: false\n",
+			assertion: `[[contracts.shape.assertions]]
+path = "policy"
+op = "exact_keys"
+value = ["enabled"]`,
+			wantReason: "exact_keys",
+		},
+		{
+			name: "boolean wrong value",
+			body: "policy:\n  enabled: false\n",
+			assertion: `[[contracts.shape.assertions]]
+path = "policy.enabled"
+op = "equals"
+value = true`,
+			wantReason: "equals",
+		},
+		{
+			name: "boolean to string",
+			body: "policy:\n  enabled: \"true\"\n",
+			assertion: `[[contracts.shape.assertions]]
+path = "policy.enabled"
+op = "equals"
+value = true`,
+			wantReason: "equals",
+		},
+		{
+			name: "duplicate key",
+			body: "policy:\n  enabled: true\n  enabled: false\n",
+			assertion: `[[contracts.shape.assertions]]
+path = "policy.enabled"
+op = "exists"`,
+			wantReason: "duplicate YAML mapping key at policy.enabled",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := writeVersionTwoProject(t)
+			if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte(test.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			contracts := `[contracts.shape]
+kind = "structure"
+subject = "artifact"
+paths = ["out/a.md"]
+format = "yaml"
+applies_to = ["one"]
+` + test.assertion + "\n"
+			if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte(contracts), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writer := &recordingWriter{}
+			result := newRunnerWithWriter(root, writer).Run([]string{"emit"})
+			if result.ExitCode != ExitFailure || len(result.Diagnostics) != 1 {
+				t.Fatalf("result = %#v", result)
+			}
+			diagnostic := result.Diagnostics[0]
+			if diagnostic.Kind != "structure_violation" || diagnostic.Path != "contracts.toml" || diagnostic.Line != 1 || diagnostic.Column != 1 || diagnostic.ArtifactPath != "out/a.md" || len(diagnostic.Related) != 1 || diagnostic.Related[0].Path != "src/a.md" || !strings.Contains(diagnostic.Message, test.wantReason) || writer.count != 0 {
+				t.Fatalf("diagnostic = %#v, writes = %d", diagnostic, writer.count)
+			}
+		})
 	}
 }
 

@@ -41,6 +41,66 @@ func TestArtifactYAMLReadsOnlyLeadingFrontmatter(t *testing.T) {
 	}
 }
 
+func TestArtifactYAMLValidatesEntireMarkdownArtifactAtDocumentRoot(t *testing.T) {
+	keys := typeddata.Value{Kind: typeddata.List, List: []typeddata.Value{scalar("policy")}}
+	contract := structureContract(config.StructureArtifact, config.StructureYAML, []config.StructureAssertion{{Path: "", Op: config.AssertExactKeys, Value: &keys}})
+	contract.AppliesTo = []string{"codex"}
+	contract.Paths = []string{"out/*.md"}
+	artifact := serialize.Artifact{
+		TargetID:   "codex",
+		SourcePath: "src/a.md",
+		Path:       "out/a.md",
+		Profile:    config.ProfileMarkdown,
+		Bytes:      []byte("policy:\n  enabled: true\n"),
+	}
+	if failures := EvaluateArtifacts(config.ContractRegistry{Contracts: []config.Contract{contract}}, []serialize.Artifact{artifact}, nil); len(failures) != 0 {
+		t.Fatalf("failures = %#v", failures)
+	}
+}
+
+func TestArtifactYAMLRejectsMultipleRawMarkdownDocuments(t *testing.T) {
+	contract := structureContract(config.StructureArtifact, config.StructureYAML, []config.StructureAssertion{{Path: "", Op: config.AssertExists}})
+	contract.AppliesTo = []string{"codex"}
+	contract.Paths = []string{"out/*.md"}
+	artifact := serialize.Artifact{TargetID: "codex", SourcePath: "src/a.md", Path: "out/a.md", Profile: config.ProfileMarkdown, Bytes: []byte("enabled: true\n---\nenabled: false\n")}
+	if failures := EvaluateArtifacts(config.ContractRegistry{Contracts: []config.Contract{contract}}, []serialize.Artifact{artifact}, nil); len(failures) != 1 || !strings.Contains(failures[0].Message, "exactly one YAML document") {
+		t.Fatalf("failures = %#v", failures)
+	}
+}
+
+func TestArtifactYAMLRawRejectsNestedDuplicateStringKey(t *testing.T) {
+	contract := structureContract(config.StructureArtifact, config.StructureYAML, []config.StructureAssertion{{Path: "policy.enabled", Op: config.AssertExists}})
+	contract.AppliesTo = []string{"codex"}
+	contract.Paths = []string{"out/*.md"}
+	artifact := serialize.Artifact{TargetID: "codex", SourcePath: "src/a.md", Path: "out/a.md", Profile: config.ProfileMarkdown, Bytes: []byte("policy:\n  enabled: true\n  enabled: false\n")}
+	if failures := EvaluateArtifacts(config.ContractRegistry{Contracts: []config.Contract{contract}}, []serialize.Artifact{artifact}, nil); len(failures) != 1 || !strings.Contains(failures[0].Message, "duplicate YAML mapping key at policy.enabled") {
+		t.Fatalf("failures = %#v", failures)
+	}
+}
+
+func TestArtifactYAMLFailureKeepsPredicateArtifactAndSourceOwnership(t *testing.T) {
+	keys := typeddata.Value{Kind: typeddata.List, List: []typeddata.Value{scalar("policy")}}
+	contract := structureContract(config.StructureArtifact, config.StructureYAML, []config.StructureAssertion{{Path: "", Op: config.AssertExactKeys, Value: &keys}})
+	contract.Position = config.ContractPosition{Path: "contracts.toml", Line: 7, Column: 3}
+	contract.AppliesTo = []string{"codex"}
+	contract.Paths = []string{"out/*.md"}
+	artifact := serialize.Artifact{
+		TargetID:   "codex",
+		SourcePath: "src/a.md",
+		Path:       "out/a.md",
+		Profile:    config.ProfileMarkdown,
+		Bytes:      []byte("policy:\n  enabled: true\nextra: false\n"),
+	}
+	failures := EvaluateArtifacts(config.ContractRegistry{Contracts: []config.Contract{contract}}, []serialize.Artifact{artifact}, nil)
+	if len(failures) != 1 {
+		t.Fatalf("failures = %#v", failures)
+	}
+	failure := failures[0]
+	if failure.Contract != contract.Position || failure.Path != artifact.Path || failure.RelatedPath != artifact.SourcePath {
+		t.Fatalf("failure ownership = %#v", failure)
+	}
+}
+
 func TestArtifactDecodersRejectUnsupportedOrAmbiguousTypedDocuments(t *testing.T) {
 	tests := []struct {
 		name    string

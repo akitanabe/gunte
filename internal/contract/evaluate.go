@@ -39,6 +39,9 @@ func evaluate(registry config.ContractRegistry, artifacts []serialize.Artifact, 
 	}
 	result := Result{Violations: make([]Violation, 0)}
 	for _, predicate := range registry.Contracts {
+		if predicate.Kind == config.PredicateStructure {
+			continue
+		}
 		if predicate.Pattern == "" && predicate.Kind != config.PredicateOrder {
 			diagnostics = append(diagnostics, predicateDiagnostic(predicate, "pattern must be non-empty"))
 			continue

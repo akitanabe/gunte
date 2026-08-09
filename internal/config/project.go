@@ -8,7 +8,11 @@ import (
 )
 
 func (v *validator) project(root map[string]any, order []toml.Key) ProjectConfig {
-	v.unknownKeys("", root, "spec_version", "project", "sources", "terms", "targets")
+	allowed := []string{"spec_version", "project", "sources", "terms", "targets"}
+	if version, ok := root["spec_version"].(int64); ok && version == 2 {
+		allowed = append(allowed, "contracts")
+	}
+	v.unknownKeys("", root, allowed...)
 	config := ProjectConfig{}
 	if raw, ok := root["spec_version"]; !ok {
 		v.add("spec_version", "spec_version is required")
@@ -16,38 +20,120 @@ func (v *validator) project(root map[string]any, order []toml.Key) ProjectConfig
 		v.add("spec_version", "spec_version must be an integer")
 	} else {
 		config.SpecVersion = int(version)
-		if version != 1 {
-			v.add("spec_version", "spec_version must be 1")
+		if version != 1 && version != 2 {
+			v.add("spec_version", "spec_version must be 1 or 2")
 		}
 	}
-	config.Project = v.projectData(root["project"])
-	config.Sources = v.sources(root["sources"])
-	targets, targetSet := v.targets(root["targets"], order)
+	config.Project = v.projectData(root["project"], config.SpecVersion)
+	if config.SpecVersion == 2 {
+		config.ContractFiles = v.contractFiles(root["contracts"])
+	} else {
+		config.ContractFiles = []string{"contracts.toml"}
+	}
+	config.Sources = v.sources(root["sources"], config.SpecVersion)
+	targets, targetSet := v.targets(root["targets"], order, config.SpecVersion)
 	config.Targets = targets
 	config.Terms = v.terms(root["terms"], order, config.TargetIDs(), targetSet)
+	if config.SpecVersion == 2 {
+		v.validateManagedScopes(config)
+	}
 	return config
 }
 
-func (v *validator) projectData(raw any) Project {
+func (v *validator) contractFiles(raw any) []string {
+	if raw == nil {
+		return []string{"contracts.toml"}
+	}
+	values, ok := table(raw)
+	if !ok {
+		v.add("contracts", "contracts must be a table")
+		return nil
+	}
+	v.unknownKeys("contracts", values, "files")
+	rawFiles, exists := values["files"]
+	if !exists {
+		return []string{"contracts.toml"}
+	}
+	items, ok := array(rawFiles)
+	if !ok {
+		v.add("contracts.files", "contracts.files must be an array of strings")
+		return nil
+	}
+	if len(items) == 0 {
+		v.add("contracts.files", "contracts.files must contain at least one path")
+	}
+	result := make([]string, 0, len(items))
+	seen := map[string]bool{}
+	for index, item := range items {
+		key := formatIndex("contracts.files", index)
+		path, ok := stringValue(item)
+		if !ok {
+			v.add(key, key+" must be a string")
+			continue
+		}
+		result = append(result, path)
+		validatePath(v, key, path)
+		if seen[path] {
+			v.add(key, "duplicate contract path "+path)
+		}
+		seen[path] = true
+	}
+	return result
+}
+
+func (v *validator) projectData(raw any, specVersion int) Project {
 	values, ok := table(raw)
 	if !ok {
 		v.add("project", "project table is required")
 		return Project{}
 	}
-	v.unknownKeys("project", values, "id", "version")
-	project := Project{ID: requiredString(v, values, "project.id", "id"), Version: requiredString(v, values, "project.version", "version")}
+	allowed := []string{"id", "version"}
+	if specVersion == 2 {
+		allowed = append(allowed, "version_from")
+	}
+	v.unknownKeys("project", values, allowed...)
+	project := Project{ID: requiredString(v, values, "project.id", "id")}
+	if specVersion == 2 {
+		version, hasVersion := values["version"]
+		versionFrom, hasVersionFrom := values["version_from"]
+		if hasVersion == hasVersionFrom {
+			v.add("project", "exactly one of project.version or project.version_from is required")
+		}
+		if hasVersion {
+			project.Version, _ = stringValue(version)
+			if _, ok := stringValue(version); !ok {
+				v.add("project.version", "project.version must be a string")
+			}
+		}
+		if hasVersionFrom {
+			project.VersionFrom, _ = stringValue(versionFrom)
+			if _, ok := stringValue(versionFrom); !ok {
+				v.add("project.version_from", "project.version_from must be a string")
+			} else {
+				validatePath(v, "project.version_from", project.VersionFrom)
+			}
+		}
+	} else {
+		project.Version = requiredString(v, values, "project.version", "version")
+	}
 	validateNonemptySingleLine(v, "project.id", project.ID)
-	validateNonemptySingleLine(v, "project.version", project.Version)
+	if project.Version != "" || specVersion != 2 || values["version"] != nil {
+		validateNonemptySingleLine(v, "project.version", project.Version)
+	}
 	return project
 }
 
-func (v *validator) sources(raw any) Sources {
+func (v *validator) sources(raw any, specVersion int) Sources {
 	values, ok := table(raw)
 	if !ok {
 		v.add("sources", "sources table is required")
 		return Sources{}
 	}
-	v.unknownKeys("sources", values, "files")
+	allowed := []string{"files"}
+	if specVersion == 2 {
+		allowed = append(allowed, "managed_roots", "allow_files", "allow_dirs")
+	}
+	v.unknownKeys("sources", values, allowed...)
 	items, ok := array(values["files"])
 	if !ok {
 		if _, exists := values["files"]; !exists {
@@ -76,10 +162,15 @@ func (v *validator) sources(raw any) Sources {
 		}
 		seen[path] = true
 	}
+	if specVersion == 2 {
+		result.ManagedRoots = v.pathList(values, "sources.managed_roots")
+		result.AllowFiles = v.pathList(values, "sources.allow_files")
+		result.AllowDirs = v.pathList(values, "sources.allow_dirs")
+	}
 	return result
 }
 
-func (v *validator) targets(raw any, order []toml.Key) ([]Target, map[string]bool) {
+func (v *validator) targets(raw any, order []toml.Key, specVersion int) ([]Target, map[string]bool) {
 	values, ok := table(raw)
 	if !ok || len(values) == 0 {
 		v.add("targets", "targets must contain at least one target")
@@ -99,9 +190,18 @@ func (v *validator) targets(raw any, order []toml.Key) ([]Target, map[string]boo
 			continue
 		}
 		prefix := "targets." + id
-		v.unknownKeys(prefix, entry, "output_root", "rules")
+		allowed := []string{"output_root", "rules"}
+		if specVersion == 2 {
+			allowed = append(allowed, "managed_roots", "allow_files", "allow_dirs")
+		}
+		v.unknownKeys(prefix, entry, allowed...)
 		target := Target{ID: id, OutputRoot: requiredString(v, entry, prefix+".output_root", "output_root"), Rules: []Rule{}}
 		validatePath(v, prefix+".output_root", target.OutputRoot)
+		if specVersion == 2 {
+			target.ManagedRoots = v.pathList(entry, prefix+".managed_roots")
+			target.AllowFiles = v.pathList(entry, prefix+".allow_files")
+			target.AllowDirs = v.pathList(entry, prefix+".allow_dirs")
+		}
 		if rawRules, exists := entry["rules"]; exists {
 			rules, ok := array(rawRules)
 			if !ok {
@@ -115,6 +215,156 @@ func (v *validator) targets(raw any, order []toml.Key) ([]Target, map[string]boo
 		result = append(result, target)
 	}
 	return result, set
+}
+
+func (v *validator) pathList(values map[string]any, keyPath string) []string {
+	leaf := keyPath[strings.LastIndexByte(keyPath, '.')+1:]
+	raw, exists := values[leaf]
+	if !exists {
+		return nil
+	}
+	items, ok := array(raw)
+	if !ok {
+		v.add(keyPath, keyPath+" must be an array of strings")
+		return nil
+	}
+	result := make([]string, 0, len(items))
+	for index, item := range items {
+		key := formatIndex(keyPath, index)
+		path, ok := stringValue(item)
+		if !ok {
+			v.add(key, key+" must be a string")
+			continue
+		}
+		result = append(result, path)
+		validatePath(v, key, path)
+	}
+	return result
+}
+
+type managedScope struct {
+	rootPrefix  string
+	managedRoot string
+}
+
+func (v *validator) validateManagedScopes(project ProjectConfig) {
+	scopes := make([]managedScope, 0)
+	for index, root := range project.Sources.ManagedRoots {
+		scopes = append(scopes, managedScope{
+			rootPrefix:  formatIndex("sources.managed_roots", index),
+			managedRoot: root,
+		})
+	}
+	for _, target := range project.Targets {
+		for index, root := range target.ManagedRoots {
+			scopes = append(scopes, managedScope{
+				rootPrefix:  formatIndex("targets."+target.ID+".managed_roots", index),
+				managedRoot: joinRelativePath(target.OutputRoot, root),
+			})
+		}
+	}
+	for first := 0; first < len(scopes); first++ {
+		for second := first + 1; second < len(scopes); second++ {
+			if pathOverlaps(scopes[first].managedRoot, scopes[second].managedRoot) {
+				v.add(scopes[second].rootPrefix, "managed root overlaps "+scopes[first].managedRoot)
+			}
+		}
+	}
+	for _, target := range project.Targets {
+		v.validateScopeAllows("targets."+target.ID, target.OutputRoot, target.ManagedRoots, target.AllowFiles, target.AllowDirs)
+	}
+	v.validateScopeAllows("sources", "", project.Sources.ManagedRoots, project.Sources.AllowFiles, project.Sources.AllowDirs)
+}
+
+func (v *validator) validateScopeAllows(prefix, outputRoot string, roots, allowFiles, allowDirs []string) {
+	fullRoots := roots
+	fullFiles := allowFiles
+	fullDirs := allowDirs
+	if outputRoot != "" {
+		fullRoots = prefixPaths(outputRoot, roots)
+		fullFiles = prefixPaths(outputRoot, allowFiles)
+		fullDirs = prefixPaths(outputRoot, allowDirs)
+	}
+	for index := range allowFiles {
+		full := fullFiles[index]
+		matches := 0
+		for _, root := range fullRoots {
+			if pathDescendant(root, full) {
+				matches++
+			}
+		}
+		if matches != 1 {
+			v.add(formatIndex(prefix+".allow_files", index), "allow file must be under exactly one managed root")
+		}
+	}
+	for index := range allowDirs {
+		full := fullDirs[index]
+		matches := 0
+		for _, root := range fullRoots {
+			if pathDescendant(root, full) {
+				matches++
+			}
+		}
+		if matches != 1 {
+			v.add(formatIndex(prefix+".allow_dirs", index), "allow directory must be under exactly one managed root")
+		}
+	}
+	type allowance struct {
+		path string
+		key  string
+		dir  bool
+	}
+	allowances := make([]allowance, 0, len(allowFiles)+len(allowDirs))
+	for index, path := range fullFiles {
+		allowances = append(allowances, allowance{path: path, key: formatIndex(prefix+".allow_files", index)})
+	}
+	for index, path := range fullDirs {
+		allowances = append(allowances, allowance{path: path, key: formatIndex(prefix+".allow_dirs", index), dir: true})
+	}
+	for first := 0; first < len(allowances); first++ {
+		for second := first + 1; second < len(allowances); second++ {
+			if allowances[first].path == allowances[second].path {
+				v.add(allowances[second].key, "allow entries overlap "+allowances[first].path)
+				continue
+			}
+			if allowances[first].dir && pathContains(allowances[first].path, allowances[second].path) {
+				v.add(allowances[second].key, "allow entry is redundantly contained by allow directory "+allowances[first].path)
+			}
+			if allowances[second].dir && pathContains(allowances[second].path, allowances[first].path) {
+				v.add(allowances[first].key, "allow entry is redundantly contained by allow directory "+allowances[second].path)
+			}
+		}
+	}
+}
+
+func prefixPaths(prefix string, paths []string) []string {
+	result := make([]string, len(paths))
+	for index, value := range paths {
+		result[index] = joinRelativePath(prefix, value)
+	}
+	return result
+}
+
+func joinRelativePath(prefix, value string) string {
+	if prefix == "" {
+		return value
+	}
+	if value == "" {
+		return prefix
+	}
+	return prefix + "/" + value
+}
+
+func pathContains(root, value string) bool {
+	return root == value || strings.HasPrefix(value, root+"/")
+}
+
+func pathDescendant(root, value string) bool {
+	return root != value && pathContains(root, value)
+}
+
+func pathOverlaps(first, second string) bool {
+	return pathContains(first, second) || pathContains(second, first)
 }
 
 func (v *validator) terms(raw any, order []toml.Key, targetIDs []string, targets map[string]bool) []Term {

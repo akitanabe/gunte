@@ -27,6 +27,7 @@ func Serialize(input adapter.Artifact) (Artifact, []Diagnostic) {
 		TargetID:   input.TargetID,
 		SourcePath: input.SourcePath,
 		Path:       input.Path,
+		Profile:    input.Profile,
 		Contracts:  declarations(input.Contracts),
 		Anchors:    declarations(input.Anchors),
 	}

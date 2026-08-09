@@ -9,14 +9,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/akitanabe/gunte/internal/adapter"
+	"github.com/akitanabe/gunte/internal/cli"
 	"github.com/akitanabe/gunte/internal/compile"
 	"github.com/akitanabe/gunte/internal/config"
 	"github.com/akitanabe/gunte/internal/contract"
+	"github.com/akitanabe/gunte/internal/inventory"
 	"github.com/akitanabe/gunte/internal/lexer"
+	"github.com/akitanabe/gunte/internal/lockfile"
 	"github.com/akitanabe/gunte/internal/serialize"
 	"github.com/akitanabe/gunte/internal/source"
+	"github.com/akitanabe/gunte/internal/structure"
 )
 
 const (
@@ -57,7 +62,16 @@ type reader interface {
 	ReadFile(path string) ([]byte, error)
 }
 
+type directoryReader interface {
+	ReadDir(path string) ([]os.DirEntry, error)
+	Lstat(path string) (os.FileInfo, error)
+}
+
 type writer interface {
+	Write(path string, data []byte) error
+}
+
+type lockWriter interface {
 	Write(path string, data []byte) error
 }
 
@@ -65,34 +79,60 @@ type writer interface {
 type Runner struct {
 	root   string
 	reader reader
+	dirs   directoryReader
 	writer writer
+	lock   lockWriter
 }
 
 // NewRunner creates a runner backed by the local filesystem.
 func NewRunner(root string) Runner {
-	return Runner{root: root, reader: localReader{}, writer: localWriter{root: root}}
+	return Runner{root: root, reader: localReader{}, dirs: localReader{}, writer: localWriter{root: root}, lock: atomicLockWriter{}}
 }
 
 func newRunnerWithWriter(root string, output writer) Runner {
-	return Runner{root: root, reader: localReader{}, writer: output}
+	return Runner{root: root, reader: localReader{}, dirs: localReader{}, writer: output, lock: atomicLockWriter{}}
 }
 
 func newRunnerWithReader(root string, input reader, output writer) Runner {
-	return Runner{root: root, reader: input, writer: output}
+	return Runner{root: root, reader: input, dirs: localReader{}, writer: output, lock: atomicLockWriter{}}
 }
 
-// Run parses the minimal CLI grammar and executes emit or check.
+func newRunnerWithWriters(root string, output writer, lockOutput lockWriter) Runner {
+	return Runner{root: root, reader: localReader{}, dirs: localReader{}, writer: output, lock: lockOutput}
+}
+
+// Run keeps the argv-based API for compatibility with existing callers.
 func (runner Runner) Run(args []string) Result {
-	command, selected, diagnostic := parseArgs(args)
-	if diagnostic != nil {
-		return Result{ExitCode: ExitUsage, Diagnostics: []Diagnostic{*diagnostic}}
+	parsed := cli.Parse(args)
+	switch parsed.Kind {
+	case cli.ParseUsageError:
+		return Result{ExitCode: ExitUsage, Diagnostics: []Diagnostic{{Kind: "usage", Message: parsed.Message}}}
+	case cli.ParseHelp:
+		return Result{ExitCode: ExitSuccess}
+	case cli.ParseExecute:
+		return runner.Execute(parsed.Request)
+	default:
+		return Result{ExitCode: ExitUsage, Diagnostics: []Diagnostic{{Kind: "usage", Message: cli.UsageMessage}}}
 	}
+}
+
+// Execute runs a parsed request against the fixed project root. The request is
+// data produced by cli.Parse; argv is not re-parsed at this boundary.
+func (runner Runner) Execute(request cli.ExecuteRequest) Result {
+	if !request.Valid() {
+		return Result{ExitCode: ExitUsage, Diagnostics: []Diagnostic{{Kind: "usage", Message: cli.UsageMessage}}}
+	}
+	command := string(request.Command)
+	selected := request.Target
 	project, diagnostics := runner.loadProject()
 	if len(diagnostics) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: diagnostics}
 	}
 	if selected != "" && !containsTarget(project, selected) {
 		return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{{Kind: "unknown_target", Path: "gunte.toml", Message: "unknown target " + selected}}}
+	}
+	if command == "lock" && project.SpecVersion != 2 {
+		return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{{Kind: "config_error", Path: "gunte.toml", Line: 1, Column: 1, Message: "gunte lock requires spec_version = 2"}}}
 	}
 	registry, diagnostics := runner.loadRegistry(project)
 	if len(diagnostics) != 0 {
@@ -106,9 +146,22 @@ func (runner Runner) Run(args []string) Result {
 	if len(sourceDiagnostics) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: sourceDiagnosticResults(sourceDiagnostics)}
 	}
+	if registryDiagnostics := compile.ValidateRegistryIntegrity(project.SpecVersion, registry, units); len(registryDiagnostics) != 0 {
+		return Result{ExitCode: ExitFailure, Diagnostics: sourceDiagnosticResults(registryDiagnostics)}
+	}
+	sourceDocuments := make([]structure.SourceDocument, len(units))
+	for index, unit := range units {
+		sourceDocuments[index] = structure.SourceDocument{Path: unit.Path, Node: unit.Document.FrontmatterNode}
+	}
+	if failures := structure.EvaluateSources(registry, sourceDocuments); len(failures) != 0 {
+		return Result{ExitCode: ExitFailure, Diagnostics: structureFailureResults(failures)}
+	}
 	artifacts, diagnostics := runner.generate(project, projection, units, selected)
 	if len(diagnostics) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: diagnostics}
+	}
+	if failures := structure.EvaluateArtifacts(registry, artifacts, selectedIDs(selected)); len(failures) != 0 {
+		return Result{ExitCode: ExitFailure, Diagnostics: structureFailureResults(failures)}
 	}
 	contractResult, contractDiagnostics := contract.EvaluateTargets(registry, artifacts, selectedIDs(selected))
 	if len(contractDiagnostics) != 0 {
@@ -117,26 +170,44 @@ func (runner Runner) Run(args []string) Result {
 	if len(contractResult.Violations) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: violationResults(contractResult.Violations)}
 	}
+	lockBytes := calculateLock(project, registry, units)
+	if command == "lock" {
+		if err := runner.lock.Write(filepath.Join(runner.root, "gunte.lock.json"), lockBytes); err != nil {
+			return Result{ExitCode: ExitFailure, Diagnostics: []Diagnostic{{Kind: "write_error", Path: "gunte.lock.json", Message: err.Error()}}}
+		}
+		return Result{ExitCode: ExitSuccess}
+	}
 	if command == "check" {
-		return runner.check(artifacts)
+		result := runner.check(artifacts)
+		if project.SpecVersion == 2 {
+			for _, path := range adapter.UnmatchedSourcePaths(project, adapterSources(units)) {
+				result.Diagnostics = append(result.Diagnostics, Diagnostic{Kind: "unmatched_source", Path: path, Message: "source does not match a rule in any target"})
+			}
+			result.Diagnostics = append(result.Diagnostics, runner.checkInventory(project, artifacts, selected)...)
+			if len(result.Diagnostics) != 0 {
+				result.ExitCode = ExitFailure
+			}
+			data, err := runner.read("gunte.lock.json")
+			if _, failed := compareOutput(outputComparison{Path: "gunte.lock.json", Expected: lockBytes, Actual: data, Err: err}); failed {
+				result.ExitCode = ExitFailure
+				result.Diagnostics = append(result.Diagnostics, Diagnostic{Kind: "lock_mismatch", Path: "gunte.lock.json", Message: "full semantic lock is missing or differs"})
+			}
+		}
+		return result
 	}
 	return runner.emit(artifacts)
 }
 
-func parseArgs(args []string) (string, string, *Diagnostic) {
-	usage := func(message string) (string, string, *Diagnostic) {
-		return "", "", &Diagnostic{Kind: "usage", Message: message}
+func structureFailureResults(failures []structure.Failure) []Diagnostic {
+	result := make([]Diagnostic, len(failures))
+	for i, failure := range failures {
+		related := []Location(nil)
+		if failure.RelatedPath != "" {
+			related = []Location{{Path: failure.RelatedPath, Line: 1, Column: 1}}
+		}
+		result[i] = Diagnostic{Kind: "structure_violation", Path: failure.Contract.Path, Line: failure.Contract.Line, Column: failure.Contract.Column, ArtifactPath: failure.Path, Related: related, Message: failure.Message}
 	}
-	if len(args) < 1 || (args[0] != "emit" && args[0] != "check") {
-		return usage("usage: gunte emit|check [--target ID]")
-	}
-	if len(args) == 1 {
-		return args[0], "", nil
-	}
-	if len(args) != 3 || args[1] != "--target" || args[2] == "" {
-		return usage("usage: gunte emit|check [--target ID]")
-	}
-	return args[0], args[2], nil
+	return result
 }
 
 func (runner Runner) loadProject() (config.ProjectConfig, []Diagnostic) {
@@ -145,16 +216,44 @@ func (runner Runner) loadProject() (config.ProjectConfig, []Diagnostic) {
 		return config.ProjectConfig{}, []Diagnostic{{Kind: "load_error", Path: "gunte.toml", Message: err.Error()}}
 	}
 	project, configDiagnostics := config.ParseProject("gunte.toml", data)
-	return project, configDiagnosticResults(configDiagnostics)
+	if len(configDiagnostics) != 0 || project.Project.VersionFrom == "" {
+		return project, configDiagnosticResults(configDiagnostics)
+	}
+	versionBytes, err := runner.read(project.Project.VersionFrom)
+	if err != nil {
+		return project, []Diagnostic{{Kind: "load_error", Path: project.Project.VersionFrom, Message: err.Error()}}
+	}
+	version, versionDiagnostic := config.NormalizeVersionFile(project.Project.VersionFrom, versionBytes)
+	if versionDiagnostic != nil {
+		return project, configDiagnosticResults([]config.Diagnostic{*versionDiagnostic})
+	}
+	project.Project.Version = version
+	return project, nil
 }
 
 func (runner Runner) loadRegistry(project config.ProjectConfig) (config.ContractRegistry, []Diagnostic) {
-	data, err := runner.read("contracts.toml")
-	if err != nil {
-		return config.ContractRegistry{}, []Diagnostic{{Kind: "load_error", Path: "contracts.toml", Message: err.Error()}}
+	documents := make([]config.ContractDocument, 0, len(project.ContractFiles))
+	var diagnostics []Diagnostic
+	for _, path := range project.ContractFiles {
+		data, err := runner.read(path)
+		if err != nil {
+			diagnostics = append(diagnostics, Diagnostic{Kind: "load_error", Path: path, Message: err.Error()})
+			continue
+		}
+		documents = append(documents, config.ContractDocument{Path: path, Bytes: data})
 	}
-	registry, configDiagnostics := config.ParseContracts("contracts.toml", data, project.TargetIDs())
+	if len(diagnostics) != 0 {
+		return config.ContractRegistry{}, diagnostics
+	}
+	registry, configDiagnostics := config.ParseContractDocuments(documents, project.TargetIDs(), project.SpecVersion)
 	return registry, configDiagnosticResults(configDiagnostics)
+}
+
+func calculateLock(project config.ProjectConfig, registry config.ContractRegistry, units []compile.SourceUnit) []byte {
+	if project.SpecVersion != 2 {
+		return nil
+	}
+	return lockfile.CanonicalBytes(project, registry, units)
 }
 
 func (runner Runner) loadSources(project config.ProjectConfig) ([]compile.SourceUnit, []Diagnostic) {
@@ -220,6 +319,114 @@ func (runner Runner) generate(project config.ProjectConfig, projection compile.R
 	return artifacts, nil
 }
 
+func adapterSources(units []compile.SourceUnit) []adapter.Source {
+	result := make([]adapter.Source, len(units))
+	for index, unit := range units {
+		result[index] = adapter.Source{Projection: compile.SourceProjection{Path: unit.Path}, Frontmatter: unit.Document.FrontmatterData}
+	}
+	return result
+}
+
+func (runner Runner) checkInventory(project config.ProjectConfig, artifacts []serialize.Artifact, selected string) []Diagnostic {
+	expectedSource := config.SemanticInputPaths(project)[1:]
+	result := make([]Diagnostic, 0)
+	for _, root := range project.Sources.ManagedRoots {
+		scope := inventory.Scope{Root: root, AllowFiles: project.Sources.AllowFiles, AllowDirs: project.Sources.AllowDirs}
+		entries, diagnostics := runner.snapshot(scope.Root)
+		result = append(result, diagnostics...)
+		for _, diagnostic := range inventory.Compare(scope, expectedSource, entries) {
+			result = append(result, Diagnostic{Kind: "inventory_mismatch", Path: diagnostic.Path, Message: diagnostic.Message})
+		}
+	}
+	for _, target := range project.Targets {
+		if selected != "" && target.ID != selected {
+			continue
+		}
+		expected := make([]string, 0)
+		for _, artifact := range artifacts {
+			if artifact.TargetID == target.ID {
+				expected = append(expected, artifact.Path)
+			}
+		}
+		for _, root := range target.ManagedRoots {
+			fullRoot := target.OutputRoot + "/" + root
+			allowFiles := prefixPaths(target.OutputRoot, target.AllowFiles)
+			allowDirs := prefixPaths(target.OutputRoot, target.AllowDirs)
+			scope := inventory.Scope{Root: fullRoot, AllowFiles: allowFiles, AllowDirs: allowDirs}
+			entries, diagnostics := runner.snapshot(fullRoot)
+			result = append(result, diagnostics...)
+			for _, diagnostic := range inventory.Compare(scope, expected, entries) {
+				result = append(result, Diagnostic{Kind: "inventory_mismatch", Path: diagnostic.Path, Message: diagnostic.Message})
+			}
+		}
+	}
+	sort.SliceStable(result, func(first, second int) bool {
+		if result[first].Path != result[second].Path {
+			return result[first].Path < result[second].Path
+		}
+		return result[first].Kind < result[second].Kind
+	})
+	return result
+}
+
+func prefixPaths(prefix string, paths []string) []string {
+	result := make([]string, len(paths))
+	for index, path := range paths {
+		result[index] = prefix + "/" + path
+	}
+	return result
+}
+
+func (runner Runner) snapshot(root string) ([]inventory.Entry, []Diagnostic) {
+	abs := filepath.Join(runner.root, filepath.FromSlash(root))
+	info, err := runner.dirs.Lstat(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, []Diagnostic{{Kind: "inventory_error", Path: root, Message: err.Error()}}
+	}
+	entries := make([]inventory.Entry, 0)
+	diagnostics := make([]Diagnostic, 0)
+	var walk func(string, string, os.FileInfo)
+	walk = func(relative, absolute string, current os.FileInfo) {
+		entries = append(entries, inventory.Entry{Path: relative, Kind: inventoryKind(current.Mode())})
+		if current.Mode()&os.ModeSymlink != 0 || !current.IsDir() {
+			return
+		}
+		children, readErr := runner.dirs.ReadDir(absolute)
+		if readErr != nil {
+			diagnostics = append(diagnostics, Diagnostic{Kind: "inventory_error", Path: relative, Message: readErr.Error()})
+			return
+		}
+		for _, child := range children {
+			childRelative := relative + "/" + child.Name()
+			childAbsolute := filepath.Join(absolute, child.Name())
+			childInfo, statErr := runner.dirs.Lstat(childAbsolute)
+			if statErr != nil {
+				diagnostics = append(diagnostics, Diagnostic{Kind: "inventory_error", Path: childRelative, Message: statErr.Error()})
+				continue
+			}
+			walk(childRelative, childAbsolute, childInfo)
+		}
+	}
+	walk(root, abs, info)
+	return entries, diagnostics
+}
+
+func inventoryKind(mode os.FileMode) inventory.Kind {
+	if mode&os.ModeSymlink != 0 {
+		return inventory.KindSymlink
+	}
+	if mode.IsDir() {
+		return inventory.KindDir
+	}
+	if mode.IsRegular() {
+		return inventory.KindFile
+	}
+	return inventory.KindOther
+}
+
 func (runner Runner) emit(artifacts []serialize.Artifact) Result {
 	result := Result{ExitCode: ExitSuccess}
 	for _, artifact := range artifacts {
@@ -269,7 +476,11 @@ func selectedIDs(selected string) []string {
 func configDiagnosticResults(diagnostics []config.Diagnostic) []Diagnostic {
 	result := make([]Diagnostic, len(diagnostics))
 	for index, diagnostic := range diagnostics {
-		result[index] = Diagnostic{Kind: "config_error", Path: diagnostic.Path, Line: diagnostic.Line, Column: diagnostic.Column, Message: diagnostic.Message}
+		related := make([]Location, len(diagnostic.Related))
+		for i, position := range diagnostic.Related {
+			related[i] = Location{Path: position.Path, Line: position.Line, Column: position.Column}
+		}
+		result[index] = Diagnostic{Kind: "config_error", Path: diagnostic.Path, Line: diagnostic.Line, Column: diagnostic.Column, Related: related, Message: diagnostic.Message}
 	}
 	return result
 }
@@ -313,7 +524,15 @@ func locations(positions []compile.SourcePosition) []Location {
 
 type localReader struct{}
 
-func (localReader) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+type atomicLockWriter struct{}
+
+func (atomicLockWriter) Write(path string, data []byte) error {
+	return lockfile.WriteAtomic(path, data)
+}
+
+func (localReader) ReadFile(path string) ([]byte, error)       { return os.ReadFile(path) }
+func (localReader) ReadDir(path string) ([]os.DirEntry, error) { return os.ReadDir(path) }
+func (localReader) Lstat(path string) (os.FileInfo, error)     { return os.Lstat(path) }
 
 type localWriter struct {
 	root string

@@ -1,13 +1,17 @@
 package config
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
+	"github.com/akitanabe/gunte/internal/canonicaljson"
 )
 
 // ParseProject parses and validates gunte.toml bytes without performing I/O.
@@ -23,13 +27,144 @@ func ParseProject(path string, input []byte) (ProjectConfig, []Diagnostic) {
 
 // ParseContracts parses and validates contracts.toml bytes without performing I/O.
 func ParseContracts(path string, input []byte, knownTargets []string) (ContractRegistry, []Diagnostic) {
+	return ParseContractsForSpec(path, input, knownTargets, 1)
+}
+
+// ParseContractsForSpec rejects v2-only fields and predicates for v1 and enables them for v2.
+func ParseContractsForSpec(path string, input []byte, knownTargets []string, specVersion int) (ContractRegistry, []Diagnostic) {
 	root, order, diagnostic := parseDocument(path, input)
 	if diagnostic != nil {
 		return ContractRegistry{}, []Diagnostic{*diagnostic}
 	}
-	v := validator{path: path, input: input}
+	v := validator{path: path, input: input, specVersion: specVersion}
 	registry := v.contracts(root, order, knownTargets)
+	if specVersion == 2 {
+		v.validateV2PredicateIDs(registry)
+	}
 	return registry, v.diagnostics
+}
+
+// ParseContractDocuments validates selected documents and folds their registries in normative order.
+func ParseContractDocuments(documents []ContractDocument, knownTargets []string, specVersion int) (ContractRegistry, []Diagnostic) {
+	registry := ContractRegistry{}
+	seen := map[string]ContractPosition{}
+	var diagnostics []Diagnostic
+	for _, document := range documents {
+		parsed, current := ParseContractsForSpec(document.Path, document.Bytes, knownTargets, specVersion)
+		if onlyDuplicateParseFailure(current) {
+			candidateSeen := clonePositions(seen)
+			duplicates := duplicateDiagnosticsFromOccurrences(document, candidateSeen)
+			if len(duplicates) != 0 {
+				seen = candidateSeen
+				diagnostics = append(diagnostics, duplicates...)
+				continue
+			}
+		}
+		diagnostics = append(diagnostics, current...)
+		for _, predicate := range parsed.Contracts {
+			if original, exists := seen[predicate.ID]; exists {
+				diagnostics = append(diagnostics, Diagnostic{Path: predicate.Position.Path, Line: predicate.Position.Line, Column: predicate.Position.Column, Related: []ContractPosition{original}, Message: "duplicate predicate " + predicate.ID})
+				continue
+			}
+			seen[predicate.ID] = predicate.Position
+			registry.Contracts = append(registry.Contracts, predicate)
+		}
+	}
+	return registry, diagnostics
+}
+
+func clonePositions(input map[string]ContractPosition) map[string]ContractPosition {
+	result := make(map[string]ContractPosition, len(input))
+	for id, position := range input {
+		result[id] = position
+	}
+	return result
+}
+
+func duplicateDiagnosticsFromOccurrences(document ContractDocument, seen map[string]ContractPosition) []Diagnostic {
+	concrete := map[string]bool{}
+	for id := range seen {
+		concrete[id] = true
+	}
+	implicitHere := map[string]bool{}
+	explicitHere := map[string]bool{}
+	var diagnostics []Diagnostic
+	for _, occurrence := range predicateOccurrences(document.Path, document.Bytes) {
+		original, exists := seen[occurrence.id]
+		if !exists {
+			seen[occurrence.id] = occurrence.position
+			original = occurrence.position
+		}
+		becomesConcrete := occurrence.concrete || (occurrence.implicit && occurrence.field == "kind")
+		firstExplicitization := occurrence.concrete && implicitHere[occurrence.id] && !explicitHere[occurrence.id]
+		if becomesConcrete && concrete[occurrence.id] && !firstExplicitization {
+			diagnostics = append(diagnostics, Diagnostic{Path: occurrence.position.Path, Line: occurrence.position.Line, Column: occurrence.position.Column, Related: []ContractPosition{original}, Message: "duplicate predicate " + occurrence.id})
+			continue
+		}
+		if occurrence.implicit && occurrence.field == "kind" && !concrete[occurrence.id] {
+			implicitHere[occurrence.id] = true
+		}
+		if occurrence.concrete {
+			explicitHere[occurrence.id] = true
+		}
+		if becomesConcrete {
+			concrete[occurrence.id] = true
+		}
+	}
+	return diagnostics
+}
+
+func onlyDuplicateParseFailure(diagnostics []Diagnostic) bool {
+	return len(diagnostics) == 1 && strings.Contains(diagnostics[0].Message, "has already been defined")
+}
+
+// NormalizeVersionFile resolves version-file bytes without performing I/O.
+func NormalizeVersionFile(path string, input []byte) (string, *Diagnostic) {
+	if !utf8.Valid(input) {
+		return "", &Diagnostic{Path: path, Line: 1, Column: 1, Message: "version file must be valid UTF-8"}
+	}
+	value := input
+	if bytes.HasPrefix(value, []byte{0xef, 0xbb, 0xbf}) {
+		value = value[3:]
+	}
+	value = bytes.ReplaceAll(value, []byte("\r\n"), []byte("\n"))
+	value = bytes.ReplaceAll(value, []byte("\r"), []byte("\n"))
+	if bytes.HasSuffix(value, []byte("\n")) {
+		value = value[:len(value)-1]
+	}
+	if len(value) == 0 {
+		return "", &Diagnostic{Path: path, Line: 1, Column: 1, Message: "version file must be non-empty"}
+	}
+	if bytes.Contains(value, []byte("\n")) {
+		return "", &Diagnostic{Path: path, Line: 1, Column: 1, Message: "version file must contain exactly one line"}
+	}
+	if bytes.HasPrefix(value, []byte{0xef, 0xbb, 0xbf}) {
+		return "", &Diagnostic{Path: path, Line: 1, Column: 1, Message: "version file may contain at most one leading BOM"}
+	}
+	return string(value), nil
+}
+
+func (v *validator) validateV2PredicateIDs(registry ContractRegistry) {
+	for _, predicate := range registry.Contracts {
+		if predicate.Slice == "" || (predicate.Kind != PredicateRequires && predicate.Kind != PredicateForbids) {
+			continue
+		}
+		dash := strings.LastIndexByte(predicate.ID, '-')
+		prefix := predicate.ID
+		if dash > 0 {
+			prefix = predicate.ID[:dash]
+		}
+		sum := sha256.Sum256(slicedPredicatePreimage(predicate))
+		want := fmt.Sprintf("%s-%x", prefix, sum[:6])
+		if predicate.ID != want {
+			v.diagnostics = append(v.diagnostics, Diagnostic{Path: predicate.Position.Path, Line: predicate.Position.Line, Column: predicate.Position.Column, Message: "predicate ID must be " + want})
+		}
+	}
+}
+
+func slicedPredicatePreimage(predicate Contract) []byte {
+	return []byte(fmt.Sprintf("{\"kind\":%s,\"slice\":%s,\"pattern\":%s,\"applies_to\":%s}\n",
+		canonicaljson.String(string(predicate.Kind)), canonicaljson.String(predicate.Slice), canonicaljson.String(predicate.Pattern), canonicaljson.StringArray(predicate.AppliesTo)))
 }
 
 func parseDocument(path string, input []byte) (map[string]any, []toml.Key, *Diagnostic) {
@@ -51,11 +186,15 @@ func parseDocument(path string, input []byte) (map[string]any, []toml.Key, *Diag
 type validator struct {
 	path        string
 	input       []byte
+	specVersion int
 	diagnostics []Diagnostic
 }
 
 func (v *validator) add(keyPath, message string) {
-	line, column := locate(v.input, keyPath)
+	line, column, ok := locateContractField(v.input, keyPath)
+	if !ok {
+		line, column = locate(v.input, keyPath)
+	}
 	v.diagnostics = append(v.diagnostics, Diagnostic{Path: v.path, Line: line, Column: column, Message: message})
 }
 

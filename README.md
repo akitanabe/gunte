@@ -4,7 +4,7 @@
 
 Gunteは、単一の正本集合からClaude Code、Codexなどのtarget向け文書を生成する、prompt artifactのための契約検査つきコンパイラです。同じsemantic build inputから、同じartifact集合をバイト単位で決定論的に生成します。
 
-v1の保証範囲は、決定論的な生成と、生成時の`requires` / `forbids` / `order`契約検査です。正本仕様は[Issue #1: Gunte v1 正本SPEC](https://github.com/akitanabe/gunte/issues/1)（Spec-Version 1 / Doc-Rev 10）で管理しています。
+v1の保証範囲は、決定論的な生成と、生成時の`requires` / `forbids` / `order`契約検査です。正本仕様は[Issue #1: Gunte v1 正本SPEC](https://github.com/akitanabe/gunte/issues/1)（Spec-Version 1 / Doc-Rev 10）で管理しています。Spec-Version 2は`spec_version = 2`で選択する追加仕様で、v1の入力、bytes、CLI、target選択を変更しません。v2専用fieldやpredicateをv1で使うと拒否されます。
 
 Gunteが解決する問題と、避けるべき設計については[アンチパターン集](docs/gunte-antipatterns.md)を参照してください。
 
@@ -17,6 +17,45 @@ Gunteが解決する問題と、避けるべき設計については[アンチ�
 - 生成物の契約検査: 必須表現、禁止表現、span / anchorの順序を最終artifact上で検査する
 - 再現可能な出力: UTF-8、LF、末尾LF、キー順などをcanonical serializationで固定する
 - drift検出: `check`で現在の入力から生成されるbytesと既存artifactを比較する
+
+## Spec-Version 2
+
+v2では複数contract file、version file、managed inventory、typed structural contract、registry integrity、lock、target scopeを扱えます。`gunte.toml`の`[contracts].files`を省略すると`contracts.toml`だけを読みます。明示した場合はそのproject相対pathだけを宣言順に読み、`contracts.toml`を暗黙追加しません。各file内のpredicate宣言順と組み合わせた順序がregistry、診断、lockの規範順です。詳細な正本仕様は[docs/gunte-spec.md](docs/gunte-spec.md)で確認できます。追加設定を組み合わせた最小例は次のとおりです。
+
+```toml
+spec_version = 2
+
+[project]
+id = "example"
+version_from = "VERSION"
+
+[contracts]
+files = ["contracts/base.toml", "contracts/structure.toml"]
+
+[sources]
+files = ["shared/guide.md"]
+managed_roots = ["shared"]
+allow_files = ["shared/README.md"]
+allow_dirs = ["shared/examples"]
+
+[targets.claude]
+output_root = "dist/claude"
+managed_roots = ["generated"]
+```
+
+`contracts/structure.toml`にはpredicateを宣言します。
+
+```toml
+[contracts.guide-frontmatter]
+kind = "structure"
+subject = "source_frontmatter"
+paths = ["shared/*.md"]
+
+[[contracts.guide-frontmatter.assertions]]
+path = "claude.description"
+op = "equals"
+value = "Agent向けガイド"
+```
 
 ## 必要環境とインストール
 
@@ -44,7 +83,7 @@ gunte 2>&1 || test $? -eq 2
 
 ## クイックスタート
 
-Gunteは、実行時のcurrent working directoryをproject rootとして扱います。次の4ファイルを用意します。
+Gunteは、実行時のcurrent working directoryをproject rootとして扱います。次の3ファイルを用意します。
 
 ```text
 example/
@@ -122,7 +161,7 @@ directive行は生成物から除かれます。`@only claude`の内容は`claud
 
 ### 3. 契約を定義する
 
-`contracts.toml`に、生成後のartifactへ課す条件を宣言します。
+既定の`contracts.toml`、またはv2の`[contracts].files`で選んだ各fileに、生成後のartifactへ課す条件を宣言します。
 
 ```toml
 [contracts.has-completion-criteria]
@@ -143,7 +182,7 @@ after = "closing"
 applies_to = ["claude", "codex"]
 ```
 
-契約が不要でも`contracts.toml`は必要です。空のregistryは次のように書きます。
+契約が不要でも選択したcontract fileは必要です。既定の空registryは`contracts.toml`へ次のように書きます。
 
 ```toml
 [contracts]
@@ -172,15 +211,21 @@ gunte check --target codex
 
 | 設定 | 内容 |
 |---|---|
-| `spec_version` | 必須。v1では`1`のみ |
+| `spec_version` | 必須。`1`または`2` |
 | `[project].id` | 必須。非空・単一行の文字列 |
-| `[project].version` | 必須。非空・単一行の文字列。`project:version`から参照可能 |
+| `[project].version` | v1では必須。v2では`version_from`とのどちらか一方が必須。非空・単一行の文字列 |
+| `[project].version_from` | v2専用。versionを読むproject相対path。`version`との併用不可 |
+| `[contracts].files` | v2専用。contract fileの順序付き、非空、重複なしのpath配列。省略時は`contracts.toml` |
 | `[sources].files` | 必須。順序付き、非空、重複なしのsource path配列 |
+| `[sources].managed_roots` | v2専用。`check`がsource inventoryを検査するproject相対root |
+| `[sources].allow_files`, `[sources].allow_dirs` | v2専用。managed root内で生成入力以外に許可するpath |
 | `[terms.<name>].<target>` | 任意の用語定義。宣言した場合は全targetの非空・単一行の値が必要 |
 | `[targets.<id>].output_root` | 必須。targetの出力root |
+| `[targets.<id>].managed_roots` | v2専用。`check`がoutput inventoryを検査する`output_root`相対root |
+| `[targets.<id>].allow_files`, `[targets.<id>].allow_dirs` | v2専用。managed root内で生成物以外に許可するpath |
 | `[[targets.<id>.rules]]` | sourceからartifactへの変換rule |
 
-pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`、backslash、NULは使用できません。`sources.files`にないファイルは走査されず、検出もされません。
+pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`、backslash、NULは使用できません。`sources.files`にないファイルはsourceとして処理されません。v2の`check`は、managed root内にある未宣言・未許可のpathをinventory mismatchとして検出します。
 
 ### rule matchingと出力path
 
@@ -189,6 +234,7 @@ pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`
 - `path`では、`match`内の各`*`を宣言順に`{1}`〜`{9}`で参照します。
 - 同じsourceが同一target内の複数ruleに一致するとエラーです。
 - `output_root + "/" + path`が別artifactまたはsemantic inputと一致するとエラーです。
+- v2のsemantic inputは`gunte.toml`、選択した全contract file、`version_from`、`sources.files`の順で最初の出現だけを採用します。選択したcontract fileはsource inventoryとartifact collisionにも同じ順序・集合で反映されます。
 
 ### 出力profile
 
@@ -223,7 +269,7 @@ metadata = [
 |---|---|
 | `core:name` | source filenameのstem |
 | `frontmatter:<path>` | TOML frontmatterの値。`.`区切りでnested tableを参照可能 |
-| `project:version` | `[project].version` |
+| `project:version` | `[project].version`、またはv2の`[project].version_from`から読んだ値 |
 | `literal:<string>` | `:`より後ろのliteral文字列 |
 
 logical typeは`string`、`string_list`、`comma_list`、`plain_token`です。profileによって利用可能なtypeが異なります。詳細な型の組み合わせとserialization規則は[正本SPEC](https://github.com/akitanabe/gunte/issues/1)を参照してください。
@@ -265,7 +311,7 @@ backtickまたはtildeを3文字以上使うfenced code block内では、directi
 
 ## 契約
 
-すべての契約で`applies_to`が必須です。`slice`、`before`、`after`は、各targetで実際に出力されるspanまたはanchorへ解決できる必要があります。
+`requires`、`forbids`、`order`では`applies_to`が必須です。`slice`、`before`、`after`は、各targetで実際に出力されるspanまたはanchorへ解決できる必要があります。v2の`structure`では、artifactを検査するときだけ`applies_to`が必須で、`source_frontmatter`を検査するときは指定できません。assertionを含む詳細は[v2正本仕様](docs/gunte-spec.md#v2-03-typed-structural-contract)を参照してください。
 
 | `kind` | 必須設定 | 成立条件 |
 |---|---|---|
@@ -278,13 +324,35 @@ patternはUTF-8の大小を区別します。pattern内の連続するspace、ta
 ## CLI
 
 ```text
-gunte emit|check [--target ID]
+gunte <command> [options]
 ```
+
+Gunteは現在の作業ディレクトリをproject rootとして実行します。`help`はproject rootの取得やproject fileの読み込みより前に完結するため、project外でも成功します。
 
 | command | 動作 |
 |---|---|
 | `emit` | 入力検証、生成、契約検査の後、artifactを出力先へ書き込む |
 | `check` | 同じ生成と契約検査を行い、既存artifactと比較する。書き込みは行わない |
+| `lock` | v2専用。全検証後に`gunte.lock.json`を更新する。target指定はない |
+| `help` | rootまたは指定commandのhelpを表示する |
+
+helpは次の入口で表示できます。
+
+```sh
+gunte --help
+gunte -h
+gunte help
+gunte help emit
+gunte help check
+gunte help lock
+gunte emit --help
+gunte check --help
+gunte lock --help
+```
+
+root helpは`gunte <command> [options]`のUsage、commandの概要、`-h, --help`、project root、終了コード、command helpへの導線を説明します。各command helpにはUsage、目的、主要input、書込/副作用、option、成功/失敗条件、例を含みます。`emit`は全検証後にwriteし、`check`はread-onlyでartifact、v2 managed inventory、v2 full lock mismatchを検査します。
+
+`--target ID`は`emit`と`check`だけが受け付けます。指定時もconfiguration、source、registryなどproject全体の検証は行われ、artifact生成または比較などtarget固有の処理だけがIDで限定されます。contract registry inputは、v2では`gunte.toml`の`[contracts].files`で選択された全fileです。
 
 | exit code | 意味 |
 |---|---|
@@ -294,14 +362,14 @@ gunte emit|check [--target ID]
 
 診断は標準エラー出力へ`kind: [path[:line:column]: ]message`形式で出力されます。関連するsource位置がある場合は、続けて`related`行を出力します。
 
-`--target ID`は生成、契約検査、比較、書き込みを指定targetに限定します。ただし、project設定とsourceの構造は常に全targetに対して検証されます。
+引数なし、unknown command、unknown/不正option、不完全な`--target`、余分なhelp引数はusageを標準エラー出力へ表示し、終了コード`2`を返します。従来のusage messageは`usage: gunte emit|check [--target ID] | gunte lock`です。
 
 ## 保証範囲と運用上の注意
 
 - `emit`は入力検証、artifact生成、契約検査が失敗した場合、書き込みを開始しません。
 - 書き込み中のI/O失敗に対するrollbackや原子的な更新は保証しません。先に書かれたartifactが残る場合があります。
 - `emit`は既存artifactを上書きしますが、今回の出力集合に含まれないstaleファイルを削除しません。
-- `check`は生成対象artifactの欠落またはbyte不一致を`output_mismatch`として報告します。余分なファイルは検出しません。
+- `check`は生成対象artifactの欠落またはbyte不一致を`output_mismatch`として報告します。v1とv2のmanaged scope外では余分なファイルを検出しません。v2のmanaged root内ではinventoryも検査します。
 - sourceはBOM、CRLF、bare CR、末尾改行をcanonical formへ正規化してから処理します。出力はUTF-8、LF、末尾LF 1つです。
 - v1の適合性fixtureは固定された入力集合に対する一致を保証するもので、fixture外のあらゆる入力やcompiler実装自身の共通原因bugを排除するものではありません。
 

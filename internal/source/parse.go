@@ -23,10 +23,11 @@ func Parse(path string, input []byte) (Document, []Diagnostic) {
 	if parts.FrontmatterRange == nil {
 		return document, nil
 	}
-	frontmatter, diagnostics := ParseFrontmatter(path, normalized, *parts.FrontmatterRange)
+	frontmatter, node, diagnostics := parseFrontmatter(path, normalized, *parts.FrontmatterRange)
 	if len(diagnostics) != 0 {
 		return document, diagnostics
 	}
 	document.FrontmatterData = frontmatter
+	document.FrontmatterNode = node
 	return document, nil
 }

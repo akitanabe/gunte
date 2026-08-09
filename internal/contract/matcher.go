@@ -38,8 +38,8 @@ func CountMatches(body []byte, pattern string) int {
 			continue
 		}
 		count++
-		// A match consumes its entire span. This is intentionally non-
-		// overlapping; a failed candidate continues at the next byte.
+		// The occurrence contract requires left-to-right, non-overlapping matches,
+		// so the next candidate starts after the matched span.
 		start = end - 1
 	}
 	return count

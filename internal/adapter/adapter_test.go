@@ -178,7 +178,7 @@ func TestAdaptReportsUnmatchedWarningAndCollisionsDeterministically(t *testing.T
 	}
 }
 
-func TestAdaptRejectsDuplicatePathBeforeMetadataMapping(t *testing.T) {
+func TestAdaptReportsPathCollisionAndMetadataFailureWithoutArtifacts(t *testing.T) {
 	project := config.ProjectConfig{Targets: []config.Target{{ID: "target", OutputRoot: "out", Rules: []config.Rule{{Match: "first.md", Path: "same.md", Profile: config.ProfileYAML, Metadata: []config.MetadataEntry{{Field: "required", From: "frontmatter:missing", Type: config.MetadataString, Required: true}}}, {Match: "second.md", Path: "same.md", Profile: config.ProfileYAML}}}}}
 	result, diagnostics := Adapt(project, []Source{{Projection: compile.SourceProjection{Path: "first.md", Bytes: []byte("first")}}, {Projection: compile.SourceProjection{Path: "second.md", Bytes: []byte("second")}}})
 	if len(diagnostics) != 2 || !hasCode(diagnostics, "path_collision") || !hasCode(diagnostics, "metadata_missing") {

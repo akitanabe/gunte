@@ -7,12 +7,11 @@ import (
 	"testing"
 )
 
-func TestDevcontainerProvidesPinnedActWithHostDockerWorkspaceAccess(t *testing.T) {
+func TestDevcontainerProvidesPinnedActInStandardWorkspace(t *testing.T) {
 	var config struct {
 		Image           string                    `json:"image"`
 		Features        map[string]map[string]any `json:"features"`
 		WorkspaceFolder string                    `json:"workspaceFolder"`
-		WorkspaceMount  string                    `json:"workspaceMount"`
 	}
 	path := filepath.Join(".devcontainer", "devcontainer.json")
 	if err := json.Unmarshal(readFile(t, path), &config); err != nil {
@@ -24,12 +23,12 @@ func TestDevcontainerProvidesPinnedActWithHostDockerWorkspaceAccess(t *testing.T
 	if _, ok := config.Features["ghcr.io/devcontainers/features/docker-outside-of-docker:1"]; !ok {
 		t.Fatal("docker-outside-of-docker feature is missing")
 	}
-	act, ok := config.Features["ghcr.io/devcontainers-extra/features/act:1"]
-	if !ok || act["version"] != "0.2.88" {
+	act, ok := config.Features["ghcr.io/devcontainers-extra/features/act:1.0.15"]
+	if !ok {
 		t.Fatalf("act feature = %#v", act)
 	}
-	if config.WorkspaceFolder != "${localWorkspaceFolder}" || !strings.Contains(config.WorkspaceMount, "target=${localWorkspaceFolder}") {
-		t.Fatalf("workspace folder=%q mount=%q", config.WorkspaceFolder, config.WorkspaceMount)
+	if config.WorkspaceFolder != "/workspaces/${localWorkspaceFolderBasename}" {
+		t.Fatalf("workspace folder = %q", config.WorkspaceFolder)
 	}
 
 	actConfig := string(readFile(t, ".actrc"))

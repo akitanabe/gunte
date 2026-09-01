@@ -81,6 +81,39 @@ gunte 2>&1 || test $? -eq 2
 
 引数なしではusageを表示し、終了コード`2`を返します。
 
+### 配布用バイナリのローカル生成
+
+Linux、Windows、macOSのamd64 / arm64向けバイナリをまとめて生成します。
+
+```sh
+scripts/build-release.sh
+```
+
+`CGO_ENABLED=0`で`cmd/gunte`をcross compileし、次の単一バイナリを`dist/`へ出力します。
+
+```text
+gunte-darwin-amd64
+gunte-darwin-arm64
+gunte-linux-amd64
+gunte-linux-arm64
+gunte-windows-amd64.exe
+gunte-windows-arm64.exe
+```
+
+出力先を変える場合は第1引数でdirectoryを指定します。このコマンドは既存の出力先を削除しません。
+
+```sh
+scripts/build-release.sh /tmp/gunte-release
+```
+
+GitHub Releaseへ添付するarchiveとchecksumもローカルで生成できます。
+
+```sh
+scripts/package-release.sh
+```
+
+macOS / Linux向けには`.tar.gz`、Windows向けには`.zip`を生成し、全6 archiveの`SHA256SUMS`とともに`dist/`へ出力します。第1引数による出力先の変更方法は`build-release.sh`と同じです。
+
 ## クイックスタート
 
 Gunteは、実行時のcurrent working directoryをproject rootとして扱います。次の3ファイルを用意します。
@@ -397,4 +430,18 @@ go test ./...
 ```sh
 go test ./...
 git diff --check
+```
+
+### GitHub Actionsのローカル検証
+
+devcontainerを起動すると、host Dockerを利用する`act`が使用できます。ローカルではLinuxの`test` jobをpull request eventとして実行します。Linux、macOS、WindowsでCLIを起動する`smoke` jobはGitHub Actionsで実行します。
+
+```sh
+act pull_request -W .github/workflows/ci.yml --job test
+```
+
+Release workflowは`v*` tag push eventだけで起動し、test成功後に配布用バイナリのビルド、package、GitHub Releaseへのuploadと公開まで実行します。通常のCIでは配布用バイナリをビルド・公開しません。GitHub Releaseを変更するstepは`act`が提供する`ACT`環境変数によってskipされます。
+
+```sh
+act push -e .github/act/release-push.json -W .github/workflows/release.yml
 ```

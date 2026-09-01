@@ -2,6 +2,7 @@
 
 # Go build and test artifacts
 /bin/
+/dist/
 *.exe
 *.exe~
 *.dll

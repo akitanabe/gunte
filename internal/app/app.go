@@ -142,7 +142,8 @@ func (runner Runner) Execute(request cli.ExecuteRequest) Result {
 	if len(diagnostics) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: diagnostics}
 	}
-	units, diagnostics := runner.loadSources(project)
+	ruleMatches := adapter.MatchRules(project, project.Sources.Files)
+	units, diagnostics := runner.loadSources(project, ruleMatches)
 	if len(diagnostics) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: diagnostics}
 	}
@@ -160,7 +161,7 @@ func (runner Runner) Execute(request cli.ExecuteRequest) Result {
 	if failures := structure.EvaluateSources(registry, sourceDocuments); len(failures) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: structureFailureResults(failures)}
 	}
-	artifacts, unmatchedSources, diagnostics := runner.generate(project, projection, units, selected)
+	artifacts, unmatchedSources, diagnostics := runner.generate(project, projection, units, ruleMatches, selected)
 	if len(diagnostics) != 0 {
 		return Result{ExitCode: ExitFailure, Diagnostics: diagnostics}
 	}
@@ -260,34 +261,50 @@ func calculateLock(project config.ProjectConfig, registry config.ContractRegistr
 	return lockfile.CanonicalBytes(project, registry, units)
 }
 
-func (runner Runner) loadSources(project config.ProjectConfig) ([]compile.SourceUnit, []Diagnostic) {
+func (runner Runner) loadSources(project config.ProjectConfig, matches adapter.RuleMatches) ([]compile.SourceUnit, []Diagnostic) {
 	units := make([]compile.SourceUnit, 0, len(project.Sources.Files))
 	var diagnostics []Diagnostic
-	for _, path := range project.Sources.Files {
+	for sourceIndex, path := range project.Sources.Files {
 		data, err := runner.read(path)
 		if err != nil {
 			diagnostics = append(diagnostics, Diagnostic{Kind: "load_error", Path: path, Message: err.Error()})
 			continue
 		}
-		document, sourceDiagnostics := source.Parse(path, data)
+		var document source.Document
+		var sourceDiagnostics []source.Diagnostic
+		opaqueOnly := matches.OpaqueOnly(project, sourceIndex)
+		if opaqueOnly {
+			var normalized []byte
+			normalized, sourceDiagnostics = source.Normalize(data)
+			for index := range sourceDiagnostics {
+				sourceDiagnostics[index].Path = path
+			}
+			document = source.Document{Buffer: normalized, BodyRange: source.Range{Start: 0, End: len(normalized)}}
+		} else {
+			document, sourceDiagnostics = source.Parse(path, data)
+		}
 		if len(sourceDiagnostics) != 0 {
 			diagnostics = append(diagnostics, sourceDiagnosticResults(sourceDiagnostics)...)
 			continue
 		}
-		ir, lexerDiagnostics := lexer.Lex(path, document.Buffer, document.BodyRange)
-		if len(lexerDiagnostics) != 0 {
-			diagnostics = append(diagnostics, sourceDiagnosticResults(lexerDiagnostics)...)
-			continue
+		var ir lexer.IR
+		if !opaqueOnly {
+			var lexerDiagnostics []source.Diagnostic
+			ir, lexerDiagnostics = lexer.Lex(path, document.Buffer, document.BodyRange)
+			if len(lexerDiagnostics) != 0 {
+				diagnostics = append(diagnostics, sourceDiagnosticResults(lexerDiagnostics)...)
+				continue
+			}
 		}
 		units = append(units, compile.SourceUnit{Path: path, Document: document, IR: ir})
 	}
 	return units, diagnostics
 }
 
-func (runner Runner) generate(project config.ProjectConfig, projection compile.Result, units []compile.SourceUnit, selected string) ([]serialize.Artifact, []string, []Diagnostic) {
+func (runner Runner) generate(project config.ProjectConfig, projection compile.Result, units []compile.SourceUnit, matches adapter.RuleMatches, selected string) ([]serialize.Artifact, []string, []Diagnostic) {
 	var artifacts []serialize.Artifact
 	var diagnostics []Diagnostic
-	plan, preflightDiagnostics := adapter.Preflight(project, adapterSources(units))
+	plan, preflightDiagnostics := adapter.PreflightMatches(project, adapterSources(units), matches)
 	for _, diagnostic := range preflightDiagnostics {
 		if diagnostic.Severity == adapter.SeverityError {
 			diagnostics = append(diagnostics, Diagnostic{Kind: diagnostic.Code, Path: diagnostic.Source, Message: diagnostic.Message})
@@ -305,7 +322,7 @@ func (runner Runner) generate(project config.ProjectConfig, projection compile.R
 		}
 		targetSources := make([]adapter.Source, len(units))
 		for sourceIndex, unit := range units {
-			targetSources[sourceIndex] = adapter.Source{Projection: projection.Targets[targetIndex].Sources[sourceIndex], Frontmatter: unit.Document.FrontmatterData}
+			targetSources[sourceIndex] = adapter.Source{Projection: projection.Targets[targetIndex].Sources[sourceIndex], WholeSource: unit.Document.Buffer, Frontmatter: unit.Document.FrontmatterData}
 		}
 		adapted, adapterDiagnostics := adapter.AdaptTarget(project, targetIndex, targetSources, plan)
 		for _, diagnostic := range adapterDiagnostics {

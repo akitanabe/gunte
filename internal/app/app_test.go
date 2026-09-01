@@ -128,6 +128,139 @@ func TestRunEmitIsDeterministicAndCheckDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestMultilineTextEmitAndCheckKeepGunteNotationLiteral(t *testing.T) {
+	root := writeProject(t, projectFixture{targets: []targetFixture{{id: "raw", root: "out", profile: "multiline-text-v1"}}, sourceBody: "\ufeff+++\r\ninvalid =\r+++\r\n<html>\r\n<!-- @only codex -->\r\n{{title}}\r\n</html>\r\n\r\n"})
+	if result := NewRunner(root).Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "out", "a.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "+++\ninvalid =\n+++\n<html>\n<!-- @only codex -->\n{{title}}\n</html>\n"
+	if string(got) != want {
+		t.Fatalf("artifact = %q, want %q", got, want)
+	}
+	if result := NewRunner(root).Run([]string{"check"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("check = %#v", result)
+	}
+}
+
+func TestMixedProfilesReportSourceErrorWithoutWriting(t *testing.T) {
+	root := writeProject(t, projectFixture{
+		targets: []targetFixture{
+			{id: "raw", root: "out/raw", profile: "multiline-text-v1"},
+			{id: "semantic", root: "out/semantic", profile: "markdown-v1", extra: "", match: "src/*.md"},
+		},
+		sourceBody: "+++\ninvalid =\n",
+	})
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = bytes.Replace(project, []byte("[[targets.semantic.rules]]\nmatch = \"src/*.md\"\npath = \"a.md\""), []byte("[[targets.semantic.rules]]\nmatch = \"src/*.md\"\npath = \"{2}\""), 1)
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writer := &recordingWriter{}
+	result := newRunnerWithWriter(root, writer).Run([]string{"emit", "--target", "raw"})
+	if result.ExitCode != ExitFailure || writer.count != 0 || !hasDiagnostic(result, "source_error") || hasDiagnostic(result, "invalid_path_template") {
+		t.Fatalf("result = %#v, writes = %d", result, writer.count)
+	}
+}
+
+func TestMixedMultilineAndSemanticProfilesEmitIndependentProjections(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourceBody := "\ufeff+++\r\ntitle = \"literal\"\r\n+++\r\n\r\nbefore {{word}}\r\n<!-- @only semantic -->\r\nsemantic\r\n<!-- @/only -->\r\n"
+	files := map[string]string{
+		"src/a.html":     sourceBody,
+		"contracts.toml": "[contracts]\n",
+		"gunte.toml": `spec_version = 1
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.html"]
+[terms.word]
+raw = "RAW"
+semantic = "SEM"
+[targets.raw]
+output_root = "out/raw"
+[[targets.raw.rules]]
+match = "src/*.html"
+path = "{1}.html"
+profile = "multiline-text-v1"
+[targets.semantic]
+output_root = "out/semantic"
+[[targets.semantic.rules]]
+match = "src/*.html"
+path = "{1}.md"
+profile = "markdown-v1"
+`,
+	}
+	for path, body := range files {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if result := NewRunner(root).Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "out", "raw", "a.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	semantic, err := os.ReadFile(filepath.Join(root, "out", "semantic", "a.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRaw := "+++\ntitle = \"literal\"\n+++\n\nbefore {{word}}\n<!-- @only semantic -->\nsemantic\n<!-- @/only -->\n"
+	wantSemantic := "before SEM\nsemantic\n"
+	if string(raw) != wantRaw || string(semantic) != wantSemantic {
+		t.Fatalf("artifacts: raw=%q semantic=%q", raw, semantic)
+	}
+}
+
+func TestUnmatchedSourceStillReceivesSemanticValidation(t *testing.T) {
+	root := writeProject(t, projectFixture{
+		targets:    []targetFixture{{id: "one", root: "out", profile: "multiline-text-v1", match: "other/*.md"}},
+		sourceBody: "+++\ninvalid =\n",
+	})
+	writer := &recordingWriter{}
+	result := newRunnerWithWriter(root, writer).Run([]string{"emit"})
+	if result.ExitCode != ExitFailure || writer.count != 0 || !hasDiagnosticPath(result, "source_error", "src/a.md") {
+		t.Fatalf("result = %#v, writes = %d", result, writer.count)
+	}
+}
+
+func TestMultilineTextInvalidUTF8ReachesNeitherArtifactNorLockWriter(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = bytes.Replace(project, []byte(`profile = "markdown-v1"`), []byte(`profile = "multiline-text-v1"`), 1)
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte{0xff}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"emit"}, {"lock"}} {
+		artifacts := &recordingWriter{}
+		locks := &recordingWriter{}
+		result := newRunnerWithWriters(root, artifacts, locks).Run(args)
+		if result.ExitCode != ExitFailure || artifacts.count != 0 || locks.count != 0 || !hasDiagnostic(result, "source_error") {
+			t.Fatalf("args=%v result=%#v artifact writes=%d lock writes=%d", args, result, artifacts.count, locks.count)
+		}
+	}
+}
+
 func TestEmitUsesProjectRelativePathsAndProducesRootIndependentBytes(t *testing.T) {
 	firstRoot := writeProject(t, projectFixture{targets: []targetFixture{{id: "one", root: "out/one"}, {id: "two", root: "out/two"}}})
 	secondRoot := writeProject(t, projectFixture{targets: []targetFixture{{id: "one", root: "out/one"}, {id: "two", root: "out/two"}}})

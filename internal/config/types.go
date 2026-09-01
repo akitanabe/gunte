@@ -94,11 +94,12 @@ type Target struct {
 type Profile string
 
 const (
-	ProfileMarkdown  Profile = "markdown-v1"
-	ProfileYAML      Profile = "markdown+yaml-frontmatter-v1"
-	ProfileTOML      Profile = "toml-v1"
-	ProfileJSON      Profile = "json-v1"
-	ProfilePlainText Profile = "plain-text-v1"
+	ProfileMarkdown      Profile = "markdown-v1"
+	ProfileYAML          Profile = "markdown+yaml-frontmatter-v1"
+	ProfileTOML          Profile = "toml-v1"
+	ProfileJSON          Profile = "json-v1"
+	ProfilePlainText     Profile = "plain-text-v1"
+	ProfileMultilineText Profile = "multiline-text-v1"
 )
 
 type Rule struct {

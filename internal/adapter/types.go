@@ -7,11 +7,47 @@ import (
 	"github.com/akitanabe/gunte/internal/config"
 )
 
-// Source supplies the projected bytes and frontmatter used by one mapping.
+// Source supplies one mapping's input. Multiline profiles use WholeSource as
+// normalized whole-source bytes; semantic profiles use Projection and Frontmatter.
 // Frontmatter is read-only input; Adapt never changes the map or its values.
 type Source struct {
-	Projection  compile.SourceProjection
+	Projection compile.SourceProjection
+	// WholeSource contains normalized whole-source bytes for multiline profiles.
+	WholeSource []byte
+	// Frontmatter is used with Projection by semantic profiles.
 	Frontmatter map[string]any
+}
+
+// RuleMatch is one source/rule match, retained independently of path validity.
+type RuleMatch struct {
+	TargetIndex int
+	RuleIndex   int
+	Captures    []string
+}
+
+// SourceRuleMatches contains all rule matches for one configured source.
+type SourceRuleMatches struct {
+	Path    string
+	Matches []RuleMatch
+}
+
+// RuleMatches is the complete source/rule match result for every target.
+type RuleMatches struct {
+	Sources []SourceRuleMatches
+}
+
+// OpaqueOnly reports whether a source matched at least one rule and every
+// matched rule uses the opaque multiline profile.
+func (matches RuleMatches) OpaqueOnly(project config.ProjectConfig, sourceIndex int) bool {
+	if sourceIndex < 0 || sourceIndex >= len(matches.Sources) || len(matches.Sources[sourceIndex].Matches) == 0 {
+		return false
+	}
+	for _, match := range matches.Sources[sourceIndex].Matches {
+		if match.TargetIndex < 0 || match.TargetIndex >= len(project.Targets) || match.RuleIndex < 0 || match.RuleIndex >= len(project.Targets[match.TargetIndex].Rules) || project.Targets[match.TargetIndex].Rules[match.RuleIndex].Profile != config.ProfileMultilineText {
+			return false
+		}
+	}
+	return true
 }
 
 // MetadataValue is the typed, pre-serialization value of a metadata mapping.

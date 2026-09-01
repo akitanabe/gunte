@@ -22,6 +22,8 @@ var yamlReservedWords = map[string]bool{
 
 // Serialize converts one logical adapter artifact to canonical UTF-8 bytes.
 // The returned declaration ranges refer to the returned artifact bytes.
+// For multiline-text-v1, callers must provide source-boundary-normalized Body;
+// Serialize copies those bytes without changing them.
 func Serialize(input adapter.Artifact) (Artifact, []Diagnostic) {
 	result := Artifact{
 		TargetID:   input.TargetID,
@@ -180,6 +182,9 @@ func Serialize(input adapter.Artifact) (Artifact, []Diagnostic) {
 			break
 		}
 		result.Bytes = []byte(input.Value.String + "\n")
+		hideDeclarations(&result)
+	case config.ProfileMultilineText:
+		result.Bytes = append([]byte(nil), input.Body...)
 		hideDeclarations(&result)
 	default:
 		diagnostics = append(diagnostics, diag("unsupported_profile", fmt.Sprintf("unsupported profile %q", input.Profile)))

@@ -14,11 +14,6 @@ import (
 	"github.com/akitanabe/gunte/internal/outputpath"
 )
 
-type matchDecision struct {
-	ruleIndex int
-	captures  []string
-}
-
 // UnmatchedSourcePaths returns source paths that do not match any rule in any
 // target. It is a pure coverage calculation used by the v2 check boundary;
 // target selection must not hide an unmatched source in another target.
@@ -49,7 +44,8 @@ func UnmatchedSourcePaths(project config.ProjectConfig, sources []Source) []stri
 // pure calculation: all returned byte slices and lists are independent copies
 // of the supplied input data.
 func Adapt(project config.ProjectConfig, sources []Source) (Result, []Diagnostic) {
-	plan, diagnostics := Preflight(project, sources)
+	matches := MatchRules(project, sourcePaths(sources))
+	plan, diagnostics := PreflightMatches(project, sources, matches)
 	result := Result{Artifacts: make([]Artifact, 0)}
 	for targetIndex := range project.Targets {
 		adapted, targetDiagnostics := AdaptTarget(project, targetIndex, sources, plan)
@@ -62,38 +58,65 @@ func Adapt(project config.ProjectConfig, sources []Source) (Result, []Diagnostic
 // Preflight resolves rule matches and validates every expanded output path for
 // every target without resolving metadata or serializing profiles.
 func Preflight(project config.ProjectConfig, sources []Source) (PathPlan, []Diagnostic) {
-	decisions := make([][]*matchDecision, len(sources))
-	diagnostics := make([]Diagnostic, 0)
-	plan := PathPlan{Artifacts: make([]PlannedArtifact, 0)}
-	for sourceIndex, source := range sources {
-		decisions[sourceIndex] = make([]*matchDecision, len(project.Targets))
-		matchedTarget := false
-		sourcePath := sourcePath(source)
+	return PreflightMatches(project, sources, MatchRules(project, sourcePaths(sources)))
+}
+
+// MatchRules calculates every rule match before path expansion can discard it.
+func MatchRules(project config.ProjectConfig, paths []string) RuleMatches {
+	result := RuleMatches{Sources: make([]SourceRuleMatches, len(paths))}
+	for sourceIndex, sourcePath := range paths {
+		result.Sources[sourceIndex].Path = sourcePath
 		for targetIndex, target := range project.Targets {
-			matches := make([]matchDecision, 0, 1)
 			for ruleIndex, rule := range target.Rules {
-				captures, matched := matchPath(rule.Match, sourcePath)
-				if matched {
-					matches = append(matches, matchDecision{ruleIndex: ruleIndex, captures: captures})
+				if captures, matched := matchPath(rule.Match, sourcePath); matched {
+					result.Sources[sourceIndex].Matches = append(result.Sources[sourceIndex].Matches, RuleMatch{TargetIndex: targetIndex, RuleIndex: ruleIndex, Captures: captures})
 				}
 			}
-			if len(matches) > 1 {
+		}
+	}
+	return result
+}
+
+func sourcePaths(sources []Source) []string {
+	paths := make([]string, len(sources))
+	for index, source := range sources {
+		paths[index] = sourcePath(source)
+	}
+	return paths
+}
+
+// PreflightMatches consumes previously calculated matches and never rematches.
+func PreflightMatches(project config.ProjectConfig, sources []Source, matches RuleMatches) (PathPlan, []Diagnostic) {
+	diagnostics := make([]Diagnostic, 0)
+	plan := PathPlan{Artifacts: make([]PlannedArtifact, 0)}
+	if len(matches.Sources) != len(sources) {
+		return plan, []Diagnostic{{Code: "invalid_rule_matches", Severity: SeverityError, Message: "rule matches do not align with sources"}}
+	}
+	decisions := make([][][]RuleMatch, len(sources))
+	for sourceIndex, source := range sources {
+		decisions[sourceIndex] = make([][]RuleMatch, len(project.Targets))
+		sourcePath := sourcePath(source)
+		if matches.Sources[sourceIndex].Path != sourcePath {
+			return plan, []Diagnostic{{Code: "invalid_rule_matches", Severity: SeverityError, Source: sourcePath, Message: "rule matches do not align with source path"}}
+		}
+		for _, match := range matches.Sources[sourceIndex].Matches {
+			if match.TargetIndex < 0 || match.TargetIndex >= len(project.Targets) || match.RuleIndex < 0 || match.RuleIndex >= len(project.Targets[match.TargetIndex].Rules) {
+				return plan, []Diagnostic{{Code: "invalid_rule_matches", Severity: SeverityError, Source: sourcePath, Message: "rule match index is outside project rules"}}
+			}
+			decisions[sourceIndex][match.TargetIndex] = append(decisions[sourceIndex][match.TargetIndex], match)
+		}
+		for targetIndex, targetMatches := range decisions[sourceIndex] {
+			if len(targetMatches) > 1 {
 				diagnostics = append(diagnostics, Diagnostic{
 					Code:     "multiple_rule_match",
 					Severity: SeverityError,
 					Source:   sourcePath,
-					Target:   target.ID,
-					Message:  fmt.Sprintf("source matches %d rules in target", len(matches)),
+					Target:   project.Targets[targetIndex].ID,
+					Message:  fmt.Sprintf("source matches %d rules in target", len(targetMatches)),
 				})
-				matchedTarget = true
-				continue
-			}
-			if len(matches) == 1 {
-				decisions[sourceIndex][targetIndex] = &matches[0]
-				matchedTarget = true
 			}
 		}
-		if !matchedTarget {
+		if len(matches.Sources[sourceIndex].Matches) == 0 {
 			plan.UnmatchedSources = append(plan.UnmatchedSources, sourcePath)
 			diagnostics = append(diagnostics, Diagnostic{
 				Code:     "unmatched_source",
@@ -108,15 +131,16 @@ func Preflight(project config.ProjectConfig, sources []Source) (PathPlan, []Diag
 	seenOutputPaths := make(map[string]int)
 	semanticInputs := semanticInputPaths(project)
 	for targetIndex, target := range project.Targets {
-		for sourceIndex, decision := range decisions {
-			if decision[targetIndex] == nil {
+		for sourceIndex, sourceDecisions := range decisions {
+			if len(sourceDecisions[targetIndex]) != 1 {
 				continue
 			}
-			ruleIndex := decision[targetIndex].ruleIndex
+			decision := sourceDecisions[targetIndex][0]
+			ruleIndex := decision.RuleIndex
 			rule := target.Rules[ruleIndex]
 			source := sources[sourceIndex]
 			sourcePath := sourcePath(source)
-			artifactPath, ok := expandPathTemplate(rule.Path, decision[targetIndex].captures)
+			artifactPath, ok := expandPathTemplate(rule.Path, decision.Captures)
 			if !ok {
 				diagnostics = append(diagnostics, Diagnostic{
 					Code:     "invalid_path_template",
@@ -279,11 +303,15 @@ func buildArtifact(project config.ProjectConfig, target config.Target, rule conf
 		Profile:    rule.Profile,
 		Header:     rule.Header,
 		BodyField:  rule.BodyField,
-		Body:       append([]byte(nil), source.Projection.Bytes...),
 		Metadata:   make([]MetadataField, 0, len(rule.Metadata)),
-		Contracts:  append([]compile.ProjectedDeclaration(nil), source.Projection.Contracts...),
-		Anchors:    append([]compile.ProjectedDeclaration(nil), source.Projection.Anchors...),
 	}
+	if rule.Profile == config.ProfileMultilineText {
+		artifact.Body = append([]byte(nil), source.WholeSource...)
+		return artifact, nil, true
+	}
+	artifact.Body = append([]byte(nil), source.Projection.Bytes...)
+	artifact.Contracts = append([]compile.ProjectedDeclaration(nil), source.Projection.Contracts...)
+	artifact.Anchors = append([]compile.ProjectedDeclaration(nil), source.Projection.Anchors...)
 	diagnostics := make([]Diagnostic, 0)
 	for _, entry := range rule.Metadata {
 		value, found, err := resolveFrom(entry.From, project, sourcePath, source.Frontmatter)

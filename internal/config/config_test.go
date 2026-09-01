@@ -304,13 +304,14 @@ PROFILE_FIELDS
 		{"toml accepts body and metadata", `profile = "toml-v1"` + "\n" + `body_field = "body"` + "\n" + `metadata = [{ field = "name", from = "core:name", type = "string" }]`, ""},
 		{"json accepts metadata", `profile = "json-v1"` + "\n" + `metadata = [{ field = "name", from = "core:name", type = "string" }]`, ""},
 		{"plain text requires value", `profile = "plain-text-v1"`, "value_from is required"},
+		{"multiline text forbids metadata", `profile = "multiline-text-v1"` + "\nmetadata = []", "metadata is not allowed"},
 		{"markdown forbids metadata", `profile = "markdown-v1"` + "\n" + `metadata = []`, "metadata is not allowed"},
 		{"yaml forbids body field", `profile = "markdown+yaml-frontmatter-v1"` + "\n" + `body_field = "body"`, "body_field is not allowed"},
 		{"toml requires producer", `profile = "toml-v1"`, "toml-v1 rule needs a content producer"},
 		{"json forbids header", `profile = "json-v1"` + "\n" + `header = "x"`, "header is not allowed"},
 		{"json forbids body field", `profile = "json-v1"` + "\n" + `body_field = "body"`, "body_field is not allowed"},
 		{"plain text forbids metadata", `profile = "plain-text-v1"` + "\n" + `value_from = "project:version"` + "\nmetadata = []", "metadata is not allowed"},
-		{"unknown profile", `profile = "html-v1"`, "profile must be one of"},
+		{"unknown profile lists multiline text", `profile = "html-v1"`, "multiline-text-v1"},
 		{"header nonempty", `profile = "markdown-v1"` + "\n" + `header = ""`, "header must be non-empty"},
 		{"header one line", `profile = "markdown-v1"` + "\n" + `header = """a\nb"""`, "header must be a single-line string"},
 		{"rule unknown", `profile = "markdown-v1"` + "\nunknown = true", "unknown key targets.one.rules[0].unknown"},
@@ -345,13 +346,14 @@ func TestProfileOptionalFieldMatrix(t *testing.T) {
 		allowed bool
 	}
 	matrix := map[Profile][]fieldExpectation{
-		ProfileMarkdown:  {{"header", true}, {"metadata", false}, {"body_field", false}, {"value_from", false}},
-		ProfileYAML:      {{"header", true}, {"metadata", true}, {"body_field", false}, {"value_from", false}},
-		ProfileTOML:      {{"header", true}, {"metadata", true}, {"body_field", true}, {"value_from", false}},
-		ProfileJSON:      {{"header", false}, {"metadata", true}, {"body_field", false}, {"value_from", false}},
-		ProfilePlainText: {{"header", false}, {"metadata", false}, {"body_field", false}, {"value_from", true}},
+		ProfileMarkdown:      {{"header", true}, {"metadata", false}, {"body_field", false}, {"value_from", false}},
+		ProfileYAML:          {{"header", true}, {"metadata", true}, {"body_field", false}, {"value_from", false}},
+		ProfileTOML:          {{"header", true}, {"metadata", true}, {"body_field", true}, {"value_from", false}},
+		ProfileJSON:          {{"header", false}, {"metadata", true}, {"body_field", false}, {"value_from", false}},
+		ProfilePlainText:     {{"header", false}, {"metadata", false}, {"body_field", false}, {"value_from", true}},
+		ProfileMultilineText: {{"header", false}, {"metadata", false}, {"body_field", false}, {"value_from", false}},
 	}
-	profiles := []Profile{ProfileMarkdown, ProfileYAML, ProfileTOML, ProfileJSON, ProfilePlainText}
+	profiles := []Profile{ProfileMarkdown, ProfileYAML, ProfileTOML, ProfileJSON, ProfilePlainText, ProfileMultilineText}
 	for _, profile := range profiles {
 		for _, expectation := range matrix[profile] {
 			t.Run(string(profile)+"_"+expectation.field, func(t *testing.T) {
@@ -366,6 +368,34 @@ func TestProfileOptionalFieldMatrix(t *testing.T) {
 				assertDiagnostic(t, diagnostics, expectation.field+" is not allowed")
 			})
 		}
+	}
+}
+
+func TestMultilineTextProfileIsAvailableInBothSpecVersions(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			projectVersion := `version = "v"`
+			if version == 2 {
+				projectVersion = `version_from = "VERSION"`
+			}
+			input := fmt.Sprintf(`spec_version = %d
+[project]
+id = "p"
+%s
+[sources]
+files = ["src/a.html"]
+[targets.one]
+output_root = "out"
+[[targets.one.rules]]
+match = "src/*"
+path = "{1}"
+profile = "multiline-text-v1"
+`, version, projectVersion)
+			project, diagnostics := ParseProject("gunte.toml", []byte(input))
+			if len(diagnostics) != 0 || project.Targets[0].Rules[0].Profile != ProfileMultilineText {
+				t.Fatalf("ParseProject() = %#v, %#v", project, diagnostics)
+			}
+		})
 	}
 }
 

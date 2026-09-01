@@ -107,6 +107,54 @@ func TestAdaptMatchesLiteralAndWildcardRulesAcrossTargets(t *testing.T) {
 	}
 }
 
+func TestRuleMatchesRetainMixedProfileMembershipOnAmbiguousMatch(t *testing.T) {
+	project := config.ProjectConfig{Targets: []config.Target{
+		{ID: "mixed", Rules: []config.Rule{
+			{Match: "src/*", Path: "one", Profile: config.ProfileMultilineText},
+			{Match: "src/*", Path: "two", Profile: config.ProfileMarkdown},
+		}},
+	}}
+	matches := MatchRules(project, []string{"src/a"})
+	if len(matches.Sources) != 1 || len(matches.Sources[0].Matches) != 2 || matches.OpaqueOnly(project, 0) {
+		t.Fatalf("matches = %#v", matches)
+	}
+	_, diagnostics := PreflightMatches(project, []Source{{Projection: compile.SourceProjection{Path: "src/a"}}}, matches)
+	if len(diagnostics) != 1 || !hasCode(diagnostics, "multiple_rule_match") {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestPreflightMatchesKeepsArtifactPathFromSavedMatch(t *testing.T) {
+	project := config.ProjectConfig{Targets: []config.Target{{
+		ID: "one", OutputRoot: "out", Rules: []config.Rule{{Match: "src/*", Path: "{1}.html", Profile: config.ProfileMultilineText}},
+	}}}
+	sources := []Source{{Projection: compile.SourceProjection{Path: "src/a"}}}
+	matches := MatchRules(project, []string{"src/a"})
+	project.Targets[0].Rules[0].Match = "other/*"
+
+	plan, diagnostics := PreflightMatches(project, sources, matches)
+	if len(diagnostics) != 0 || len(plan.Artifacts) != 1 || plan.Artifacts[0].Path != "out/a.html" {
+		t.Fatalf("PreflightMatches() = %#v, %#v", plan, diagnostics)
+	}
+}
+
+func TestAdaptMultilineTextUsesWholeSourceBodyWithoutExposingDeclarations(t *testing.T) {
+	project := config.ProjectConfig{Targets: []config.Target{{ID: "raw", Rules: []config.Rule{{Match: "src/*", Path: "a.html", Profile: config.ProfileMultilineText}}}}}
+	sources := []Source{{
+		Projection:  compile.SourceProjection{Path: "src/a", Bytes: []byte("projected\n"), Contracts: []compile.ProjectedDeclaration{{ID: "hidden"}}},
+		WholeSource: []byte("+++\ninvalid =\n+++\n<!-- @only codex -->\n{{term}}\n"),
+		Frontmatter: map[string]any{"ignored": true},
+	}}
+	result, diagnostics := Adapt(project, sources)
+	if len(diagnostics) != 0 || len(result.Artifacts) != 1 {
+		t.Fatalf("Adapt() = %#v, %#v", result, diagnostics)
+	}
+	artifact := result.Artifacts[0]
+	if !bytes.Equal(artifact.Body, sources[0].WholeSource) || len(artifact.Metadata) != 0 || len(artifact.Contracts) != 0 || len(artifact.Anchors) != 0 || artifact.Value != nil {
+		t.Fatalf("artifact = %#v", artifact)
+	}
+}
+
 func TestUnmatchedSourcePathsUseAllTargetsIndependentlyOfSelection(t *testing.T) {
 	project := config.ProjectConfig{Targets: []config.Target{
 		{ID: "one", Rules: []config.Rule{{Match: "one.md"}}},

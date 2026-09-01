@@ -545,15 +545,16 @@ type rulePresence struct {
 
 func (v *validator) validateProfile(rule Rule, presence rulePresence, prefix string) {
 	allowed := map[Profile]map[string]bool{
-		ProfileMarkdown:  {"header": true},
-		ProfileYAML:      {"header": true, "metadata": true},
-		ProfileTOML:      {"header": true, "metadata": true, "body_field": true},
-		ProfileJSON:      {"metadata": true},
-		ProfilePlainText: {"value_from": true},
+		ProfileMarkdown:      {"header": true},
+		ProfileYAML:          {"header": true, "metadata": true},
+		ProfileTOML:          {"header": true, "metadata": true, "body_field": true},
+		ProfileJSON:          {"metadata": true},
+		ProfilePlainText:     {"value_from": true},
+		ProfileMultilineText: {},
 	}
 	fields, known := allowed[rule.Profile]
 	if !known {
-		v.add(prefix+".profile", "profile must be one of markdown-v1, markdown+yaml-frontmatter-v1, toml-v1, json-v1, plain-text-v1")
+		v.add(prefix+".profile", "profile must be one of markdown-v1, markdown+yaml-frontmatter-v1, toml-v1, json-v1, plain-text-v1, multiline-text-v1")
 		return
 	}
 	declared := []struct {

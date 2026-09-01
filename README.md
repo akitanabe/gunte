@@ -12,7 +12,7 @@ Gunteが解決する問題と、避けるべき設計については[アンチ�
 
 - targetごとの本文投影: `@only`でClaude Code用、Codex用などの記述を1つの正本内に共存させる
 - 用語の置換: `{{term_name}}`をtargetごとの語彙へ置き換える
-- artifact変換: Markdown、YAML frontmatter付きMarkdown、TOML、JSON、plain textを生成する
+- artifact変換: Markdown、YAML frontmatter付きMarkdown、TOML、JSON、plain text、opaque multiline textを生成する
 - metadata mapping: source frontmatter、ファイル名、project version、literalから値を取得する
 - 生成物の契約検査: 必須表現、禁止表現、span / anchorの順序を最終artifact上で検査する
 - 再現可能な出力: UTF-8、LF、末尾LF、キー順などをcanonical serializationで固定する
@@ -278,10 +278,13 @@ pathはproject相対の`/`区切りです。絶対path、空segment、`.`、`..`
 | `toml-v1` | TOML | `header`, `metadata`, `body_field` |
 | `json-v1` | top-level JSON object | `metadata` |
 | `plain-text-v1` | 単一行の値 | `value_from` |
+| `multiline-text-v1` | 正規化したsource全体 | なし |
 
 `markdown+yaml-frontmatter-v1`で`metadata`を宣言した場合はfrontmatterを生成します。`metadata`が空の場合は、target投影後のbody先頭にある`---`で囲まれたYAML frontmatterをbytesのまま保存します。
 
 `json-v1`はsource bodyのtop-level objectを読み、同名metadataを元の位置で上書きし、新規metadataを宣言順で末尾へ追加します。v1のsource由来JSON値はobject、array、stringに対応します。
+
+`multiline-text-v1`はSpec-Version 1/2でopt-in利用できます。source全体をUTF-8 textとして読み、先頭BOMを最大1個除去し、CRLFとbare CRをLFへ変換し、末尾LFをexactly oneにして、そのbytesを付加物なしで出力します。`header`、`metadata`、`body_field`、`value_from`は指定できません。binaryやexecutable bitの保存は行いません。
 
 ### metadata mapping
 
@@ -308,6 +311,8 @@ metadata = [
 logical typeは`string`、`string_list`、`comma_list`、`plain_token`です。profileによって利用可能なtypeが異なります。詳細な型の組み合わせとserialization規則は[正本SPEC](https://github.com/akitanabe/gunte/issues/1)を参照してください。
 
 ## 正本sourceの記法
+
+sourceが一致する全ruleのprofileが`multiline-text-v1`だけの場合、以下のfrontmatter、directive、term記法は解釈されずliteral contentとして残ります。既存profileとのmixed source、またはどのruleにも一致しないsourceは、従来どおりこれらの記法を解析・検証します。
 
 ### TOML frontmatter
 
@@ -404,7 +409,7 @@ root helpは`gunte <command> [options]`のUsage、commandの概要、`-h, --help
 - 書き込み中のI/O失敗に対するrollbackや原子的な更新は保証しません。先に書かれたartifactが残る場合があります。
 - `emit`は既存artifactを上書きしますが、今回の出力集合に含まれないstaleファイルを削除しません。
 - `check`は生成対象artifactの欠落またはbyte不一致を`output_mismatch`として報告します。v1とv2のmanaged scope外では余分なファイルを検出しません。v2のmanaged root内ではinventoryも検査します。
-- sourceはBOM、CRLF、bare CR、末尾改行をcanonical formへ正規化してから処理します。出力はUTF-8、LF、末尾LF 1つです。
+- sourceはBOM、CRLF、bare CR、末尾改行を一度だけcanonical formへ正規化してから処理します。出力はUTF-8、LF、末尾LF 1つです。`multiline-text-v1`のserializerは正規化済みsourceを再正規化しません。
 - v1の適合性fixtureは固定された入力集合に対する一致を保証するもので、fixture外のあらゆる入力やcompiler実装自身の共通原因bugを排除するものではありません。
 
 CIでは、正本または設定の変更後に生成物をcommitし、drift検出として`gunte check`を実行してください。

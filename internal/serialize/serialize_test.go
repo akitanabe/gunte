@@ -36,6 +36,22 @@ func TestSerializeMarkdownInsertsHeaderAndMapsPositions(t *testing.T) {
 	}
 }
 
+func TestSerializeMultilineTextPreservesProvidedBodyAndHidesDeclarations(t *testing.T) {
+	body := []byte{0xff, '\r', '\n'}
+	input := adapter.Artifact{
+		Path: "out/a.html", Profile: config.ProfileMultilineText, Body: body,
+		Contracts: []compile.ProjectedDeclaration{{ID: "hidden", Emitted: true}},
+		Anchors:   []compile.ProjectedDeclaration{{ID: "hidden-anchor", Emitted: true}},
+	}
+	got, diagnostics := Serialize(input)
+	if len(diagnostics) != 0 || !bytes.Equal(got.Bytes, body) {
+		t.Fatalf("Serialize() = %q, %#v", got.Bytes, diagnostics)
+	}
+	if got.Contracts[0].Emitted || got.Anchors[0].Emitted {
+		t.Fatalf("declarations exposed = %#v %#v", got.Contracts, got.Anchors)
+	}
+}
+
 func TestSerializeAcceptsOptionalHeadersWithoutExtraBytes(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -434,13 +434,13 @@ git diff --check
 
 ### GitHub Actionsのローカル検証
 
-devcontainerを起動すると、host Dockerを利用する`act`が使用できます。CI workflowはpull request eventとして実行します。
+devcontainerを起動すると、host Dockerを利用する`act`が使用できます。ローカルではLinuxの`test` jobをpull request eventとして実行します。Linux、macOS、WindowsでCLIを起動する`smoke` jobはGitHub Actionsで実行します。
 
 ```sh
-act pull_request -W .github/workflows/ci.yml
+act pull_request -W .github/workflows/ci.yml --job test
 ```
 
-Release workflowはローカル専用のtag push eventで、testとpackageまで実行します。GitHub Releaseを変更するstepは`act`が提供する`ACT`環境変数によってskipされます。
+Release workflowは`v*` tag push eventだけで起動し、test成功後に配布用バイナリのビルド、package、GitHub Releaseへのuploadと公開まで実行します。通常のCIでは配布用バイナリをビルド・公開しません。GitHub Releaseを変更するstepは`act`が提供する`ACT`環境変数によってskipされます。
 
 ```sh
 act push -e .github/act/release-push.json -W .github/workflows/release.yml

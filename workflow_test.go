@@ -27,7 +27,14 @@ type job struct {
 	Needs       string            `yaml:"needs"`
 	Permissions map[string]string `yaml:"permissions"`
 	RunsOn      string            `yaml:"runs-on"`
+	Strategy    workflowStrategy  `yaml:"strategy"`
 	Steps       []workflowStep    `yaml:"steps"`
+}
+
+type workflowStrategy struct {
+	Matrix struct {
+		OS []string `yaml:"os"`
+	} `yaml:"matrix"`
 }
 
 type workflowStep struct {
@@ -51,9 +58,33 @@ func TestCIWorkflowTestsMainAndPullRequests(t *testing.T) {
 	assertGoTestJob(t, ci.Jobs["test"])
 }
 
+func TestCIWorkflowStartsTheCLIOnEachSupportedOperatingSystem(t *testing.T) {
+	ci := readWorkflow(t, ".github/workflows/ci.yml")
+	smoke := ci.Jobs["smoke"]
+	if smoke.Needs != "test" {
+		t.Fatalf("smoke needs = %q, want test", smoke.Needs)
+	}
+	if smoke.RunsOn != "${{ matrix.os }}" {
+		t.Fatalf("smoke runs-on = %q, want matrix.os", smoke.RunsOn)
+	}
+	assertEqualStrings(t, smoke.Strategy.Matrix.OS, []string{"ubuntu-latest", "macos-latest", "windows-latest"})
+	assertUses(t, smoke, "actions/checkout@v6")
+	setup := assertUses(t, smoke, "actions/setup-go@v7")
+	if setup.With["go-version-file"] != "go.mod" {
+		t.Fatalf("go-version-file = %q, want go.mod", setup.With["go-version-file"])
+	}
+	assertRunContains(t, smoke, "go run ./cmd/gunte --help")
+}
+
 func TestReleaseWorkflowPackagesVerifiedTagAndPublishesRetryably(t *testing.T) {
 	release := readWorkflow(t, ".github/workflows/release.yml")
 	assertEqualStrings(t, release.On.Push.Tags, []string{"v*"})
+	if len(release.On.Push.Branches) != 0 {
+		t.Fatalf("release branches = %v, want none", release.On.Push.Branches)
+	}
+	if release.On.PullRequest != nil {
+		t.Fatal("release must not run for pull requests")
+	}
 	if release.Permissions["contents"] != "read" {
 		t.Fatalf("default contents permission = %q, want read", release.Permissions["contents"])
 	}

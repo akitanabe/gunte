@@ -399,6 +399,213 @@ profile = "multiline-text-v1"
 	}
 }
 
+func TestParseProjectPreservesBodyValueDeclarationOrderForBothSpecVersions(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			projectVersion := `version = "v"`
+			if version == 2 {
+				projectVersion = `version_from = "VERSION"`
+			}
+			input := fmt.Sprintf(`spec_version = %d
+[project]
+id = "p"
+%s
+[sources]
+files = ["src/a.md"]
+[body_values.first]
+from = "project:version"
+[body_values.second]
+from = "project:version"
+[targets.one]
+output_root = "out"
+`, version, projectVersion)
+			project, diagnostics := ParseProject("body-values.toml", []byte(input))
+			if len(diagnostics) != 0 {
+				t.Fatalf("ParseProject() diagnostics = %#v", diagnostics)
+			}
+			want := []BodyValue{{Name: "first", From: "project:version"}, {Name: "second", From: "project:version"}}
+			if !reflect.DeepEqual(project.BodyValues, want) {
+				t.Fatalf("body values = %#v, want %#v", project.BodyValues, want)
+			}
+		})
+	}
+}
+
+func TestParseProjectValidatesBodyValueSchemaAndNames(t *testing.T) {
+	base := `spec_version = 1
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+[body_values.release]
+from = "project:version"
+[targets.one]
+output_root = "out"
+`
+	tests := []struct {
+		name, replacement, message string
+	}{
+		{"body values type", "body_values = \"bad\"\n", "body_values must be a table"},
+		{"body value type", "[body_values.release]\nfrom = 1", "from must be a string"},
+		{"body value missing from", "[body_values.release]\n", "from is required"},
+		{"body value unknown source", "[body_values.release]\nfrom = \"project:id\"", "unsupported body value source"},
+		{"body value unknown key", "[body_values.release]\nfrom = \"project:version\"\nextra = true", "unknown key body_values.release.extra"},
+		{"body value invalid name", "[body_values.Bad]\nfrom = \"project:version\"", "invalid body value name"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := base
+			if tt.name == "body values type" {
+				input = strings.Replace(base, "[body_values.release]\nfrom = \"project:version\"\n", "", 1)
+				input = strings.Replace(input, "[project]", tt.replacement+"[project]", 1)
+			} else {
+				input = strings.Replace(base, "[body_values.release]\nfrom = \"project:version\"", tt.replacement, 1)
+			}
+			_, diagnostics := ParseProject("body-values.toml", []byte(input))
+			assertDiagnostic(t, diagnostics, tt.message)
+		})
+	}
+
+	collision := strings.Replace(base, "[body_values.release]", "[terms.release]\none = \"static\"\n\n[body_values.release]", 1)
+	_, diagnostics := ParseProject("body-values-collision.toml", []byte(collision))
+	assertDiagnostic(t, diagnostics, "conflicts with term release")
+}
+
+func TestBodyValueDiagnosticsUseTheirOwnTableAndFieldPositions(t *testing.T) {
+	input := []byte(`spec_version = 2
+[project]
+id = "p"
+version_from = "VERSION"
+[sources]
+files = ["src/a.md"]
+[body_values.first]
+from = "project:id"
+[body_values.second]
+from = 1
+[targets.one]
+output_root = "out"
+`)
+	_, diagnostics := ParseProject("body-values-positions.toml", input)
+	first := findDiagnostic(t, diagnostics, "unsupported body value source")
+	if first.Line != 8 || first.Column != 1 {
+		t.Fatalf("first body value diagnostic = %#v, want its from field", first)
+	}
+	second := findDiagnostic(t, diagnostics, "from must be a string")
+	if second.Line != 10 || second.Column != 1 {
+		t.Fatalf("second body value diagnostic = %#v, want its from field", second)
+	}
+}
+
+func TestMissingBodyValueFromUsesItsOwnTablePosition(t *testing.T) {
+	input := []byte(`spec_version = 1
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+[body_values.first]
+[body_values.second]
+from = "project:version"
+[targets.one]
+output_root = "out"
+`)
+	_, diagnostics := ParseProject("body-values-missing-position.toml", input)
+	diagnostic := findDiagnostic(t, diagnostics, "from is required")
+	if diagnostic.Line != 7 || diagnostic.Column != 1 {
+		t.Fatalf("missing body value diagnostic = %#v, want first table position", diagnostic)
+	}
+}
+
+func TestBodyValueTermCollisionUsesItsOwnTablePosition(t *testing.T) {
+	input := []byte(`spec_version = 2
+[project]
+id = "p"
+version_from = "VERSION"
+[sources]
+files = ["src/a.md"]
+[body_values.first]
+from = "project:version"
+[terms.release]
+one = "static"
+[body_values.release]
+from = "project:version"
+[targets.one]
+output_root = "out"
+`)
+	_, diagnostics := ParseProject("body-values-collision-position.toml", input)
+	diagnostic := findDiagnostic(t, diagnostics, "conflicts with term release")
+	if diagnostic.Line != 11 || diagnostic.Column != 1 {
+		t.Fatalf("body value collision diagnostic = %#v, want collision table position", diagnostic)
+	}
+}
+
+func TestBodyValueFieldDiagnosticsIdentifyExactOwningPathAndPosition(t *testing.T) {
+	tests := []struct {
+		name, path, input, message string
+		line, column               int
+	}{
+		{
+			name: "scalar child",
+			path: "body-values-scalar.toml",
+			input: `spec_version = 1
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+[body_values]
+scalar = "bad"
+[targets.one]
+output_root = "out"
+`,
+			message: "body value scalar must be a table", line: 8, column: 1,
+		},
+		{
+			name: "empty from",
+			path: "body-values-empty-from.toml",
+			input: `spec_version = 2
+[project]
+id = "p"
+version_from = "VERSION"
+[sources]
+files = ["src/a.md"]
+[body_values.release]
+from = ""
+[targets.one]
+output_root = "out"
+`,
+			message: "unsupported body value source", line: 8, column: 1,
+		},
+		{
+			name: "extra key",
+			path: "body-values-extra.toml",
+			input: `spec_version = 1
+[project]
+id = "p"
+version = "v"
+[sources]
+files = ["src/a.md"]
+[body_values.release]
+from = "project:version"
+extra = true
+[targets.one]
+output_root = "out"
+`,
+			message: "unknown key body_values.release.extra", line: 9, column: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, diagnostics := ParseProject(tt.path, []byte(tt.input))
+			diagnostic := findDiagnostic(t, diagnostics, tt.message)
+			if diagnostic.Path != tt.path || diagnostic.Line != tt.line || diagnostic.Column != tt.column {
+				t.Fatalf("diagnostic = %#v, want path=%q line=%d column=%d", diagnostic, tt.path, tt.line, tt.column)
+			}
+		})
+	}
+}
+
 func projectWithOptionalRuleField(profile Profile, field string) string {
 	fieldDeclaration := map[string]string{
 		"header":     `header = "generated"`,

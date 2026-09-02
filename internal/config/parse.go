@@ -191,11 +191,75 @@ type validator struct {
 }
 
 func (v *validator) add(keyPath, message string) {
+	if line, column, ok := locateBodyValueField(v.input, keyPath); ok {
+		v.diagnostics = append(v.diagnostics, Diagnostic{Path: v.path, Line: line, Column: column, Message: message})
+		return
+	}
 	line, column, ok := locateContractField(v.input, keyPath)
 	if !ok {
 		line, column = locate(v.input, keyPath)
 	}
 	v.diagnostics = append(v.diagnostics, Diagnostic{Path: v.path, Line: line, Column: column, Message: message})
+}
+
+func locateBodyValueField(input []byte, keyPath string) (int, int, bool) {
+	segments := strings.Split(keyPath, ".")
+	if len(segments) < 2 || segments[0] != "body_values" {
+		return 0, 0, false
+	}
+	name := segments[1]
+	field := ""
+	if len(segments) > 2 {
+		field = strings.Join(segments[2:], ".")
+	}
+	current := ""
+	foundHeader := false
+	headerLine, headerColumn := 0, 0
+	inMultiline := ""
+	for lineIndex, raw := range strings.Split(string(input), "\n") {
+		line, nextMultiline := tomlCode(raw, inMultiline)
+		inMultiline = nextMultiline
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			if current == name && field != "" {
+				return headerLine, headerColumn, true
+			}
+			close := strings.IndexByte(trimmed, ']')
+			if close <= 0 || strings.HasPrefix(trimmed, "[[") {
+				current = ""
+				continue
+			}
+			path := tomlKeySegments(trimmed[1:close])
+			if len(path) == 2 && path[0] == "body_values" {
+				current = path[1]
+				if current == name {
+					foundHeader = true
+					headerLine, headerColumn = lineIndex+1, strings.Index(raw, "[")+1
+				}
+			} else {
+				current = ""
+			}
+			continue
+		}
+		if current != name {
+			continue
+		}
+		if field == "" {
+			return headerLine, headerColumn, true
+		}
+		equal := strings.IndexByte(trimmed, '=')
+		if equal < 0 {
+			continue
+		}
+		key := strings.TrimSpace(trimmed[:equal])
+		if parts := tomlKeySegments(key); len(parts) == 1 && parts[0] == field {
+			return lineIndex + 1, strings.Index(raw, key) + 1, true
+		}
+	}
+	if foundHeader {
+		return headerLine, headerColumn, true
+	}
+	return 0, 0, false
 }
 
 func locate(input []byte, keyPath string) (int, int) {

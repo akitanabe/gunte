@@ -175,7 +175,7 @@ func TestMixedMultilineAndSemanticProfilesEmitIndependentProjections(t *testing.
 	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sourceBody := "\ufeff+++\r\ntitle = \"literal\"\r\n+++\r\n\r\nbefore {{word}}\r\n<!-- @only semantic -->\r\nsemantic\r\n<!-- @/only -->\r\n"
+	sourceBody := "\ufeff+++\r\ntitle = \"literal\"\r\n+++\r\n\r\nbefore {{word}} {{release}}\r\n<!-- @only semantic -->\r\nsemantic\r\n<!-- @/only -->\r\n"
 	files := map[string]string{
 		"src/a.html":     sourceBody,
 		"contracts.toml": "[contracts]\n",
@@ -183,6 +183,8 @@ func TestMixedMultilineAndSemanticProfilesEmitIndependentProjections(t *testing.
 [project]
 id = "p"
 version = "v"
+[body_values.release]
+from = "project:version"
 [sources]
 files = ["src/a.html"]
 [terms.word]
@@ -218,8 +220,8 @@ profile = "markdown-v1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRaw := "+++\ntitle = \"literal\"\n+++\n\nbefore {{word}}\n<!-- @only semantic -->\nsemantic\n<!-- @/only -->\n"
-	wantSemantic := "before SEM\nsemantic\n"
+	wantRaw := "+++\ntitle = \"literal\"\n+++\n\nbefore {{word}} {{release}}\n<!-- @only semantic -->\nsemantic\n<!-- @/only -->\n"
+	wantSemantic := "before SEM v\nsemantic\n"
 	if string(raw) != wantRaw || string(semantic) != wantSemantic {
 		t.Fatalf("artifacts: raw=%q semantic=%q", raw, semantic)
 	}
@@ -734,6 +736,89 @@ func TestVersionFromSuppliesProjectVersionAndParticipatesInCollision(t *testing.
 	}
 	if result := NewRunner(collisionRoot).Run([]string{"emit"}); result.ExitCode != ExitFailure || !hasDiagnostic(result, "path_collision") {
 		t.Fatalf("version_from collision = %#v", result)
+	}
+}
+
+func TestBodyValueUsesVersionFromAndDetectsVersionFileDrift(t *testing.T) {
+	root := writeVersionTwoProject(t)
+	projectPath := filepath.Join(root, "gunte.toml")
+	project, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = bytes.Replace(project, []byte("[sources]"), []byte("[body_values.release]\nfrom = \"project:version\"\n[sources]"), 1)
+	if err := os.WriteFile(projectPath, project, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "a.md"), []byte("<!-- @contract release -->\nrelease={{release}}\n<!-- @/contract -->\ndecoy=outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "contracts.toml"), []byte(`[contracts.release-6567cedacb0e]
+kind = "requires"
+slice = "release"
+pattern = "release=2"
+applies_to = ["one"]
+[contracts.release-a9f3db6d6f27]
+kind = "forbids"
+slice = "release"
+pattern = "decoy=outside"
+applies_to = ["one"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	if result := runner.Run([]string{"lock"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("lock = %#v", result)
+	}
+	lockPath := filepath.Join(root, "gunte.lock.json")
+	lockBefore, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("emit = %#v", result)
+	}
+	artifactPath := filepath.Join(root, "out", "a.md")
+	artifact, err := os.ReadFile(artifactPath)
+	if err != nil || string(artifact) != "release=2\ndecoy=outside\n" {
+		t.Fatalf("artifact = %q, %v", artifact, err)
+	}
+	initialCheckArtifacts := &recordingWriter{}
+	initialCheckLock := &recordingWriter{}
+	if result := newRunnerWithWriters(root, initialCheckArtifacts, initialCheckLock).Run([]string{"check"}); result.ExitCode != ExitSuccess || initialCheckArtifacts.count != 0 || initialCheckLock.count != 0 {
+		t.Fatalf("initial check = %#v, artifact writes = %d, lock writes = %d", result, initialCheckArtifacts.count, initialCheckLock.count)
+	}
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("2.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staleCheckArtifacts := &recordingWriter{}
+	staleCheckLock := &recordingWriter{}
+	result := newRunnerWithWriters(root, staleCheckArtifacts, staleCheckLock).Run([]string{"check"})
+	if result.ExitCode != ExitFailure || staleCheckArtifacts.count != 0 || staleCheckLock.count != 0 || !hasDiagnostic(result, "output_mismatch") {
+		t.Fatalf("stale output check = %#v, artifact writes = %d, lock writes = %d", result, staleCheckArtifacts.count, staleCheckLock.count)
+	}
+	lockAfterDrift, err := os.ReadFile(lockPath)
+	if err != nil || !bytes.Equal(lockAfterDrift, lockBefore) {
+		t.Fatalf("version-only drift changed lock: before=%q after=%q err=%v", lockBefore, lockAfterDrift, err)
+	}
+	if result := runner.Run([]string{"emit"}); result.ExitCode != ExitSuccess {
+		t.Fatalf("re-emit = %#v", result)
+	}
+	artifact, err = os.ReadFile(artifactPath)
+	if err != nil || string(artifact) != "release=2.0\ndecoy=outside\n" {
+		t.Fatalf("updated artifact = %q, %v", artifact, err)
+	}
+	lockAfterEmit, err := os.ReadFile(lockPath)
+	if err != nil || !bytes.Equal(lockAfterEmit, lockBefore) {
+		t.Fatalf("re-emit changed lock: before=%q after=%q err=%v", lockBefore, lockAfterEmit, err)
+	}
+	finalCheckArtifacts := &recordingWriter{}
+	finalCheckLock := &recordingWriter{}
+	if result := newRunnerWithWriters(root, finalCheckArtifacts, finalCheckLock).Run([]string{"check"}); result.ExitCode != ExitSuccess || finalCheckArtifacts.count != 0 || finalCheckLock.count != 0 {
+		t.Fatalf("check after re-emit = %#v, artifact writes = %d, lock writes = %d", result, finalCheckArtifacts.count, finalCheckLock.count)
 	}
 }
 

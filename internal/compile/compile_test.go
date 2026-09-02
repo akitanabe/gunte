@@ -102,6 +102,59 @@ func TestValidateAndProjectKeepsReplacementValuesLiteral(t *testing.T) {
 	}
 }
 
+func TestValidateAndProjectReplacesBodyValuesWithoutRecursiveExpansion(t *testing.T) {
+	input := []byte("before {{term}} {{release}}\n" +
+		"<!-- @contract review -->\n" +
+		"<!-- @only codex -->\n" +
+		"kept {{release}}\n" +
+		"<!-- @anchor tail -->\n" +
+		"<!-- @/only -->\n" +
+		"<!-- @only other -->\n" +
+		"hidden {{release}}\n" +
+		"<!-- @/only -->\n" +
+		"<!-- @/contract -->\n" +
+		"```md\n{{release}}\n```\n")
+	unit := parsedUnit(t, "body-values.md", input)
+	project := config.ProjectConfig{
+		Project:    config.Project{Version: "1.{{term}}"},
+		Sources:    config.Sources{Files: []string{"body-values.md"}},
+		Terms:      []config.Term{{Name: "term", Values: []config.TargetValue{{TargetID: "codex", Value: "value"}}}},
+		BodyValues: []config.BodyValue{{Name: "release", From: "project:version"}},
+		Targets:    []config.Target{{ID: "codex"}, {ID: "other"}},
+	}
+
+	result, diagnostics := ValidateAndProject(project, []SourceUnit{unit})
+	if len(diagnostics) != 0 {
+		t.Fatalf("ValidateAndProject() diagnostics = %#v", diagnostics)
+	}
+	got := result.Targets[0].Sources[0]
+	want := []byte("before value 1.{{term}}\nkept 1.{{term}}\n```md\n{{release}}\n```\n")
+	if !bytes.Equal(got.Bytes, want) {
+		t.Fatalf("projection = %q, want %q", got.Bytes, want)
+	}
+	contractStart := strings.Index(string(want), "kept")
+	contractEnd := strings.Index(string(want), "```md")
+	assertDeclaration(t, got.Contracts, "review", true, source.Range{Start: contractStart, End: contractEnd})
+	assertDeclaration(t, got.Anchors, "tail", true, source.Range{Start: contractEnd, End: contractEnd})
+	if strings.Contains(string(got.Bytes), "hidden") {
+		t.Fatalf("excluded body value block was retained: %q", got.Bytes)
+	}
+}
+
+func TestValidateAndProjectReportsUndefinedBodyValueTokens(t *testing.T) {
+	unit := parsedUnit(t, "undefined-body-value.md", []byte("{{missing}}\n"))
+	project := config.ProjectConfig{
+		Sources:    config.Sources{Files: []string{"undefined-body-value.md"}},
+		BodyValues: []config.BodyValue{{Name: "release", From: "project:version"}},
+		Targets:    []config.Target{{ID: "codex"}},
+	}
+	_, diagnostics := ValidateAndProject(project, []SourceUnit{unit})
+	want := []source.Diagnostic{{Path: "undefined-body-value.md", Offset: 0, Line: 1, Column: 1, Message: "undefined term missing"}}
+	if !reflect.DeepEqual(diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", diagnostics, want)
+	}
+}
+
 func TestValidateAndProjectPreservesLiteralDirectiveShapesAndFences(t *testing.T) {
 	input := []byte(" <!-- @anchor indented -->\n<!--@contract tight-->\n```md\n<!-- @only other -->\n{{unknown}}\n<!-- @/only -->\n```\n")
 	unit := parsedUnit(t, "literal.md", input)

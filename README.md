@@ -253,6 +253,7 @@ gunte check --target codex
 | `[sources].managed_roots` | v2専用。`check`がsource inventoryを検査するproject相対root |
 | `[sources].allow_files`, `[sources].allow_dirs` | v2専用。managed root内で生成入力以外に許可するpath |
 | `[terms.<name>].<target>` | 任意の用語定義。宣言した場合は全targetの非空・単一行の値が必要 |
+| `[body_values.<name>].from` | 任意の本文値定義。`project:version`だけを指定でき、宣言順を保持する |
 | `[targets.<id>].output_root` | 必須。targetの出力root。v2だけは`.`でrepository rootを指定可能 |
 | `[targets.<id>].managed_roots` | v2専用。`check`がoutput inventoryを検査する`output_root`相対root |
 | `[targets.<id>].allow_files`, `[targets.<id>].allow_dirs` | v2専用。managed root内で生成物以外に許可するpath |
@@ -308,6 +309,8 @@ metadata = [
 | `project:version` | `[project].version`、またはv2の`[project].version_from`から読んだ値 |
 | `literal:<string>` | `:`より後ろのliteral文字列 |
 
+body valueの`from`は現在`project:version`だけを許可します。body value宣言は`gunte.toml`のsemantic inputに含まれ、v2でversion fileだけを変更した場合はlock schemaを変更せず、再計算されたartifact bytesとの差分を`check`が検出します。`emit`後は同じ入力で`check`が成功します。
+
 logical typeは`string`、`string_list`、`comma_list`、`plain_token`です。profileによって利用可能なtypeが異なります。詳細な型の組み合わせとserialization規則は[正本SPEC](https://github.com/akitanabe/gunte/issues/1)を参照してください。
 
 ## 正本sourceの記法
@@ -340,6 +343,19 @@ description = "Codex向けの説明"
 | `<!-- @contract <id> -->` ... `<!-- @/contract -->` | 契約の`slice`として参照する連続範囲 |
 | `<!-- @anchor <id> -->` | `order`契約で参照する位置 |
 | `{{term_name}}` | target別の用語へ置換する |
+
+`body_values`はSpec-Version 1/2で使用できるopt-inの本文値です。宣言したnameだけが本文tokenとして認識されます。
+
+```toml
+[body_values.release]
+from = "project:version"
+```
+
+正本sourceでは`{{release}}`のように参照します。`project:version`はv1の`[project].version`、またはv2の`[project].version_from`で指定したversion fileの内容を値とします。nameはtermと同じ文法で、静的termと同名にはできません。未指定のtokenは従来どおりundefined term診断になります。
+
+target projectionは`@only`で除外する範囲とdirectiveを処理した後、保持本文の出現順を保ったまま静的termとbody valueの各tokenを1回ずつ置換します。replacement内の`{{...}}`は再評価せずliteralとして扱い、fenced code block内のtokenは置換しません。contract span、anchor、artifactのrangeはreplacement長の増減を反映した最終bytesを指します。
+
+`multiline-text-v1`だけに一致するsourceはWholeSource literalのままで、body valueを含むsemantic projectionを行いません。semantic profileとのmixed sourceではsemantic artifactだけが置換されます。`plain-text-v1`の出力値は従来どおりruleの`value_from`が正本で、body value tokenの置換結果を使いません。型不正、missing/unknown `from`、invalid name、静的termとのcollision、余分なkeyはconfig errorとしてwriter到達前に拒否します。
 
 directiveは行頭から行末まで文法に一致する独立行だけが認識されます。インデント、余分なtoken、delimiter周辺の空白不足などで一致しない行は、エラーではなく通常の本文として扱われます。
 

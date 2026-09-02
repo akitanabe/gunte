@@ -9,7 +9,7 @@ import (
 )
 
 func (v *validator) project(root map[string]any, order []toml.Key) ProjectConfig {
-	allowed := []string{"spec_version", "project", "sources", "terms", "targets"}
+	allowed := []string{"spec_version", "project", "sources", "terms", "body_values", "targets"}
 	if version, ok := root["spec_version"].(int64); ok && version == 2 {
 		allowed = append(allowed, "contracts")
 	}
@@ -35,10 +35,64 @@ func (v *validator) project(root map[string]any, order []toml.Key) ProjectConfig
 	targets, targetSet := v.targets(root["targets"], order, config.SpecVersion)
 	config.Targets = targets
 	config.Terms = v.terms(root["terms"], order, config.TargetIDs(), targetSet)
+	config.BodyValues = v.bodyValues(root["body_values"], order)
+	v.validateBodyValueNames(config.Terms, config.BodyValues)
 	if config.SpecVersion == 2 {
 		v.validateManagedScopes(config)
 	}
 	return config
+}
+
+func (v *validator) bodyValues(raw any, order []toml.Key) []BodyValue {
+	values, ok := table(raw)
+	if raw == nil {
+		return nil
+	}
+	if !ok {
+		v.add("body_values", "body_values must be a table")
+		return nil
+	}
+	names := orderedChildNames(order, "body_values")
+	result := make([]BodyValue, 0, len(names))
+	for _, name := range names {
+		prefix := "body_values." + name
+		if !termNamePattern.MatchString(name) {
+			v.add(prefix, "invalid body value name "+name)
+		}
+		entry, ok := table(values[name])
+		if !ok {
+			v.add(prefix, "body value "+name+" must be a table")
+			continue
+		}
+		v.unknownKeys(prefix, entry, "from")
+		from, exists := entry["from"]
+		if !exists {
+			v.add(prefix+".from", "from is required")
+			continue
+		}
+		value, ok := stringValue(from)
+		if !ok {
+			v.add(prefix+".from", "from must be a string")
+			continue
+		}
+		if value != "project:version" {
+			v.add(prefix+".from", "unsupported body value source "+value)
+		}
+		result = append(result, BodyValue{Name: name, From: value})
+	}
+	return result
+}
+
+func (v *validator) validateBodyValueNames(terms []Term, bodyValues []BodyValue) {
+	termsByName := make(map[string]bool, len(terms))
+	for _, term := range terms {
+		termsByName[term.Name] = true
+	}
+	for _, bodyValue := range bodyValues {
+		if termsByName[bodyValue.Name] {
+			v.add("body_values."+bodyValue.Name, "body value "+bodyValue.Name+" conflicts with term "+bodyValue.Name)
+		}
+	}
 }
 
 func (v *validator) contractFiles(raw any) []string {

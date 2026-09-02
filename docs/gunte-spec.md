@@ -29,6 +29,21 @@ usage: gunte emit|check [--target ID] | gunte lock
 
 v2 [project] は version またはproject相対path version_from のexactly oneを必須とする。version fileはUTF-8で、先頭BOMを最大1個除去し、CRLF/bare CRをLFへ正規化する。その後、末尾LFが0個ならそのまま、1個なら1個だけ除去して、残りが非空かつLFを含まないことを要求する。末尾LFが2個以上、または本文途中LFは単一行違反である。前後空白はopaque valueの一部として保持する。version fileはsemantic input、source inventory期待file、collision、lockの対象である。
 
+## Body values (Spec-Version 1/2)
+
+`body_values`はSpec-Version 1/2で使用できるopt-inのtop-level tableである。各`[body_values.<name>]` tableは`from`を必須とし、初期仕様で許可する値は`project:version`だけである。
+
+```toml
+[body_values.release]
+from = "project:version"
+```
+
+`name`はterm nameと同じ文法で、body value宣言の順序を保持する。静的`terms`と同名のname、missing/invalid/unknown `from`、型不正、余分なkeyは所有するtableまたはfield位置の安定したconfig errorとし、既存TOML parserが拒否する重複table専用のvalidationは追加しない。未宣言の本文tokenは既存の`undefined term <name>`診断とする。
+
+`project:version`はv1の`[project].version`、またはv2の`[project].version_from`で指定したversion fileの値を参照する。I/Oやlock schemaはbody valueのために追加しない。body value宣言は`gunte.toml`の既存semantic inputに含まれる。v2のversion fileだけを変更した場合、lock bytesは変更せず、再計算されたartifact bytesとの差分を`check`が検出する。`emit`後は同じversionで`check`が成功し、config/source/contract validationの失敗はwriter到達前に維持される。
+
+semantic profileのprojectionは、`@only`除外とdirective除去の後、保持本文の出現順を保ったままstatic termとbody valueの各tokenを1回ずつ置換する。fenced code block内のtokenはlexer既存規則どおりliteralに保持し、replacement内の`{{...}}`は再帰評価しない。contract span、anchor、serializerのartifact rangeはreplacement長の増減を反映した最終artifact bytesを指す。`multiline-text-v1`だけに一致するsourceはWholeSource literalで、frontmatter/directive/term/body valueを解釈しない。mixed sourceではsemantic artifactだけを置換し、multiline artifactはliteralのままとする。`plain-text-v1`はruleの`value_from`を正本とし、body value tokenの結果を出力値に使わない。既存profile/metadata/target/v1 oracle bytesとの互換性を維持する。
+
 ## V2-02 managed inventory
 
 v2 [sources] と各 [targets.<id>] は managed_roots, allow_files, allow_dirs を持てる。source値はproject相対、target値はoutput_root相対である。v2のtargetだけはoutput_root = "."をrepository root sentinelとして使用でき、artifactとmanaged scopeの展開結果に`./`を付けない。他のpath field、managed_roots、v1 output_rootで`.`はinvalidである。未指定managed_rootsはroot targetでも空でrepository rootを所有しない。展開後managed rootsはsource/全target間で同一・ancestor/descendant overlapを禁止する。allow entryはexactly one root配下で、allow同士の冗長overlapを禁止する。

@@ -19,7 +19,7 @@ type splice struct {
 
 func projectSource(project config.ProjectConfig, targetID string, unit SourceUnit) SourceProjection {
 	excluded := excludedRanges(targetID, unit.IR.OnlyBlocks)
-	splices := projectionSplices(project, targetID, unit, excluded)
+	splices := projectionSplices(unit, excluded, projectionValues(project, targetID))
 	projected, applied := applySplices(unit.Document.Buffer, unit.Document.BodyRange, splices)
 
 	result := SourceProjection{Path: unit.Path, Bytes: projected}
@@ -56,7 +56,7 @@ func excludedRanges(targetID string, blocks []lexer.Block) []source.Range {
 	return result
 }
 
-func projectionSplices(project config.ProjectConfig, targetID string, unit SourceUnit, excluded []source.Range) []splice {
+func projectionSplices(unit SourceUnit, excluded []source.Range, values map[string]string) []splice {
 	splices := make([]splice, 0, len(unit.IR.Markers)+len(unit.IR.TermUses)+len(excluded))
 	for _, deletion := range excluded {
 		splices = append(splices, splice{start: deletion.Start, end: deletion.End})
@@ -66,7 +66,6 @@ func projectionSplices(project config.ProjectConfig, targetID string, unit Sourc
 			splices = append(splices, splice{start: marker.Range.Start, end: marker.Range.End})
 		}
 	}
-	values := termValues(project.Terms, targetID)
 	for _, term := range unit.IR.TermUses {
 		if !containedByAny(term.Range, excluded) {
 			splices = append(splices, splice{start: term.Range.Start, end: term.Range.End, replacement: []byte(values[term.Name])})
@@ -89,6 +88,16 @@ func termValues(terms []config.Term, targetID string) map[string]string {
 				values[term.Name] = value.Value
 				break
 			}
+		}
+	}
+	return values
+}
+
+func projectionValues(project config.ProjectConfig, targetID string) map[string]string {
+	values := termValues(project.Terms, targetID)
+	for _, bodyValue := range project.BodyValues {
+		if bodyValue.From == "project:version" {
+			values[bodyValue.Name] = project.Project.Version
 		}
 	}
 	return values

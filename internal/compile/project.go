@@ -59,6 +59,9 @@ func validateSourceUnits(project config.ProjectConfig, units []SourceUnit) []sou
 	for _, term := range project.Terms {
 		terms[term.Name] = true
 	}
+	for _, bodyValue := range project.BodyValues {
+		terms[bodyValue.Name] = true
+	}
 	declarations := map[string]SourcePosition{}
 	for _, unit := range units {
 		for _, marker := range unit.IR.Markers {

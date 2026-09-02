@@ -18,6 +18,7 @@ type ProjectConfig struct {
 	ContractFiles []string
 	Sources       Sources
 	Terms         []Term
+	BodyValues    []BodyValue
 	Targets       []Target
 }
 
@@ -75,6 +76,11 @@ type Sources struct {
 type Term struct {
 	Name   string
 	Values []TargetValue
+}
+
+type BodyValue struct {
+	Name string
+	From string
 }
 
 type TargetValue struct {
